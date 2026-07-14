@@ -249,8 +249,18 @@ Please see https://github.com/love2d/megasource
 		${THEORA_INCLUDE_DIR}
 	)
 
+	# No GL library under libretro. glad resolves every entry point at runtime
+	# through the address the frontend hands it, so linking libGL buys nothing --
+	# and costs portability: a board with only GLES has no libGL.so to satisfy, and
+	# the core would fail to load there over a library it never actually calls.
+	if(LOVE_LIBRETRO)
+		set(LOVE_OPENGL_LIBRARY "")
+	else()
+		set(LOVE_OPENGL_LIBRARY ${OPENGL_gl_LIBRARY})
+	endif()
+
 	set(LOVE_LINK_LIBRARIES
-		${OPENGL_gl_LIBRARY}
+		${LOVE_OPENGL_LIBRARY}
 		${SDL2_LIBRARIES}
 		${FREETYPE_LIBRARY}
 		${OPENAL_LIBRARY}
