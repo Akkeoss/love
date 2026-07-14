@@ -27,6 +27,10 @@
 #include "common/Exception.h"
 
 #include "graphics/Graphics.h"
+
+#ifdef LOVE_ENABLE_LIBRETRO
+#include "libretro_state.h"
+#endif
 #include "graphics/Buffer.h"
 
 // C++
@@ -57,6 +61,17 @@ namespace opengl
 
 static void *LOVEGetProcAddress(const char *name)
 {
+#ifdef LOVE_ENABLE_LIBRETRO
+	// SDL has no GL context here -- the frontend owns it -- so SDL_GL_GetProcAddress
+	// would hand back null for every symbol, and glad would load a table of null
+	// pointers. The first GL call then jumps to address 0: a crash with nothing to
+	// point at its cause. The frontend's resolver is the only one that knows about
+	// its own context.
+	if (love::libretro::state.gl_get_proc_address)
+		return (void *) love::libretro::state.gl_get_proc_address(name);
+	return nullptr;
+#else
+
 #ifdef LOVE_ANDROID
 	void *proc = dlsym(RTLD_DEFAULT, name);
 	if (proc)
@@ -64,6 +79,7 @@ static void *LOVEGetProcAddress(const char *name)
 #endif
 
 	return SDL_GL_GetProcAddress(name);
+#endif // LOVE_ENABLE_LIBRETRO
 }
 
 OpenGL::TempDebugGroup::TempDebugGroup(const char *name)
@@ -895,6 +911,21 @@ void OpenGL::bindFramebuffer(FramebufferTarget target, GLuint framebuffer)
 {
 	bool bindingmodified = false;
 
+#ifdef LOVE_ENABLE_LIBRETRO
+	// The cache has to be bypassed here.
+	//
+	// It exists to skip a redundant glBindFramebuffer, and that is right when
+	// LOVE owns the context: if it believes FBO n is bound, it is. Under libretro
+	// it is not -- the frontend binds and unbinds its own FBO around every
+	// retro_run(), without telling us. The cache then says "already bound", the
+	// bind is skipped, and every draw call lands on framebuffer 0, which does not
+	// exist here. The result is a black screen with no GL error to explain it.
+	bindingmodified = true;
+	if (target & FRAMEBUFFER_DRAW)
+		state.boundFramebuffers[0] = framebuffer;
+	if (target & FRAMEBUFFER_READ)
+		state.boundFramebuffers[1] = framebuffer;
+#else
 	if ((target & FRAMEBUFFER_DRAW) && state.boundFramebuffers[0] != framebuffer)
 	{
 		bindingmodified = true;
@@ -906,6 +937,7 @@ void OpenGL::bindFramebuffer(FramebufferTarget target, GLuint framebuffer)
 		bindingmodified = true;
 		state.boundFramebuffers[1] = framebuffer;
 	}
+#endif // LOVE_ENABLE_LIBRETRO
 
 	if (bindingmodified)
 	{
@@ -982,7 +1014,15 @@ void OpenGL::useProgram(GLuint program)
 
 GLuint OpenGL::getDefaultFBO() const
 {
-#ifdef LOVE_IOS
+#if defined(LOVE_ENABLE_LIBRETRO)
+	// There is no system backbuffer: the libretro frontend hands us an FBO to
+	// render into, and it may hand us a different one on any frame (RetroArch
+	// does exactly that when it double-buffers). So ask every time rather than
+	// cache it anywhere.
+	if (love::libretro::state.gl_get_framebuffer)
+		return (GLuint) love::libretro::state.gl_get_framebuffer();
+	return 0;
+#elif defined(LOVE_IOS)
 	// Hack: iOS uses a custom FBO.
 	SDL_SysWMinfo info = {};
 	SDL_VERSION(&info.version);

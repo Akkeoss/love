@@ -362,6 +362,20 @@ return function()
 		result = xpcall(love.init, deferErrhand)
 		if not result then return end
 
+		-- Under libretro the frontend owns the main loop, so the game is not
+		-- allowed to. Many .love games -- especially anything from the 0.10 era --
+		-- ship their own love.run built around `while true do ... end`, which
+		-- never returns. In a normal LOVE that is fine. In a core it means
+		-- retro_run() is entered once and never comes back: the frontend freezes,
+		-- with the game running happily inside it.
+		--
+		-- So the game's love.run is replaced with ours, which runs exactly one
+		-- frame and yields. This has to happen after love.init (the game and its
+		-- love.run are loaded by then) and before love.run is called.
+		if love._libretro_run then
+			love.run = love._libretro_run
+		end
+
 		-- NOTE: We can't assign to func directly, as we'd
 		-- overwrite the result of deferErrhand with nil on error
 		local main

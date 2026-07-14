@@ -22,7 +22,11 @@
 
 #include "wrap_Keyboard.h"
 
+#ifdef LOVE_ENABLE_LIBRETRO
+#include "libretro/Keyboard.h"
+#else
 #include "sdl/Keyboard.h"
+#endif
 
 namespace love
 {
@@ -207,7 +211,11 @@ extern "C" int luaopen_love_keyboard(lua_State *L)
 	Keyboard *instance = instance();
 	if (instance == nullptr)
 	{
+		#ifdef LOVE_ENABLE_LIBRETRO
+		luax_catchexcept(L, [&](){ instance = new love::keyboard::libretro::Keyboard(); });
+#else
 		luax_catchexcept(L, [&](){ instance = new love::keyboard::sdl::Keyboard(); });
+#endif
 	}
 	else
 		instance->retain();

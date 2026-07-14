@@ -57,3 +57,6 @@ libtool
 stamp-h1
 /src/love
 /src/tags
+
+# Build directories (libretro core).
+/build*/

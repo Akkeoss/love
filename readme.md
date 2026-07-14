@@ -3,6 +3,17 @@ LÖVE is an *awesome* framework you can use to make 2D games in Lua. It's free, 
 [![Build Status: Windows](https://ci.appveyor.com/api/projects/status/chc0hdr08wv1d5c7?svg=true)](https://ci.appveyor.com/project/slime73/love)
 [![Build Status: Github CI](https://github.com/love2d/love/workflows/continuous-integration/badge.svg)](https://github.com/love2d/love/actions?query=workflow%3Acontinuous-integration)
 
+---
+
+**This is a fork.** On top of upstream LÖVE 11.5, it builds a **libretro core**
+(`love_libretro.so`), so `.love` games can run under RetroArch — and, the point of the
+exercise, on Recalbox. Everything else here is upstream's.
+
+The core is off by default: a normal LÖVE build is exactly what it was before. See
+[Building the libretro core](#building-the-libretro-core) below.
+
+---
+
 Documentation
 -------------
 
@@ -81,6 +92,49 @@ See `readme-iOS.rtf` for more information.
 
 ### Android
 Visit the [Android build repository][android-repository] for build instructions.
+
+### Building the libretro core
+
+*This is the fork's addition, not part of upstream LÖVE.*
+
+	$ cmake -B build -DCMAKE_BUILD_TYPE=Release -DLOVE_LIBRETRO=ON
+	$ cmake --build build --target love_libretro -j$(nproc)
+	# -> build/love_libretro.so
+
+Drop the `.so` into a frontend's cores directory and give it a `.love` file. It runs
+with no content too, in which case you get LÖVE's "nogame" screen.
+
+The option defaults to `OFF`, and everything the port touches is behind
+`#ifdef LOVE_ENABLE_LIBRETRO`, so a stock LÖVE build is unaffected.
+
+**Dependencies differ from the normal build:** the core needs *neither SDL2 nor a GL
+library*. The frontend owns the window, the input and the audio device, and glad
+resolves every GL entry point at runtime through the address the frontend provides.
+That is what lets one binary serve a desktop (OpenGL 3.3) and an ARM board
+(OpenGL ES 3) — the core asks for each in turn and keeps the first the frontend
+offers. Everything else (LuaJIT, OpenAL, FreeType, ModPlug, mpg123, Vorbis, Theora,
+zlib) is as usual.
+
+#### What works, and what does not
+
+Video, audio, keyboard, mouse and gamepad all work; so do canvases, shaders and
+mid-game resolution changes. Mr. Rescue -- a real, finished game -- plays from its
+title screen through to game over.
+
+Two things are worth knowing before you try a game:
+
+- **Games must target LÖVE 11.x.** Anything written for 0.10 will fail on API changes
+  that predate this port — official LÖVE 11.5 rejects those games too, and the core
+  deliberately behaves the same rather than papering over it.
+- **`love.run` is overridden.** Many games (nearly everything from the 0.10 era) ship
+  their own `love.run` built around `while true do ... end`. That is fine in a normal
+  LÖVE and fatal in a core: `retro_run()` would be entered once and never return, so
+  the frontend freezes while the game runs happily inside it. Under libretro the
+  frontend owns the main loop, so the core installs its own `love.run` over the
+  game's.
+
+Not implemented: save states (snapshotting a live Lua VM plus its GPU resources is a
+research project, not an oversight), rumble, and `love.video`.
 
 Dependencies
 ------------

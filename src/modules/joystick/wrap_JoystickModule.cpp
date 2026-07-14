@@ -24,7 +24,11 @@
 #include "filesystem/Filesystem.h"
 #include "filesystem/wrap_Filesystem.h"
 
+#ifdef LOVE_ENABLE_LIBRETRO
+#include "libretro/JoystickModule.h"
+#else
 #include "sdl/JoystickModule.h"
+#endif
 
 namespace love
 {
@@ -194,7 +198,11 @@ extern "C" int luaopen_love_joystick(lua_State *L)
 	JoystickModule *instance = instance();
 	if (instance == nullptr)
 	{
+		#ifdef LOVE_ENABLE_LIBRETRO
+		luax_catchexcept(L, [&](){ instance = new libretro::JoystickModule(); });
+#else
 		luax_catchexcept(L, [&](){ instance = new sdl::JoystickModule(); });
+#endif
 	}
 	else
 		instance->retain();

@@ -23,7 +23,11 @@
 #include "wrap_Cursor.h"
 #include "common/config.h"
 
+#ifdef LOVE_ENABLE_LIBRETRO
+#include "libretro/Mouse.h"
+#else
 #include "sdl/Mouse.h"
+#endif
 #include "filesystem/File.h"
 
 namespace love
@@ -243,7 +247,11 @@ extern "C" int luaopen_love_mouse(lua_State *L)
 	Mouse *instance = instance();
 	if (instance == nullptr)
 	{
+		#ifdef LOVE_ENABLE_LIBRETRO
+		luax_catchexcept(L, [&](){ instance = new love::mouse::libretro::Mouse(); });
+#else
 		luax_catchexcept(L, [&](){ instance = new love::mouse::sdl::Mouse(); });
+#endif
 	}
 	else
 		instance->retain();

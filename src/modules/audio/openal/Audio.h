@@ -127,6 +127,13 @@ public:
 
 	bool getEffectID(const char *name, ALuint &id);
 
+#ifdef LOVE_ENABLE_LIBRETRO
+	// Render `samples` frames of interleaved stereo int16 into `buffer`, which
+	// must hold samples*2 shorts. Called once per frame by the libretro core;
+	// this is the whole pull side of the audio path.
+	void renderSamples(int16_t *buffer, int samples);
+#endif
+
 private:
 	void initializeEFX();
 	// The OpenAL device.

@@ -23,7 +23,11 @@
 // LOVE
 #include "common/runtime.h"
 
+#ifdef LOVE_ENABLE_LIBRETRO
+#include "libretro/Event.h"
+#else
 #include "sdl/Event.h"
+#endif
 
 // Shove the wrap_Event.lua code directly into a raw string literal.
 static const char event_lua[] =
@@ -122,7 +126,11 @@ extern "C" int luaopen_love_event(lua_State *L)
 	Event *instance = instance();
 	if (instance == nullptr)
 	{
+		#ifdef LOVE_ENABLE_LIBRETRO
+		luax_catchexcept(L, [&](){ instance = new love::event::libretro::Event(); });
+#else
 		luax_catchexcept(L, [&](){ instance = new love::event::sdl::Event(); });
+#endif
 	}
 	else
 		instance->retain();

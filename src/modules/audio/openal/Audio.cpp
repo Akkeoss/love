@@ -30,12 +30,32 @@
 #include "common/ios.h"
 #endif
 
+#ifdef LOVE_ENABLE_LIBRETRO
+#include "libretro_state.h"
+#endif
+
 namespace love
 {
 namespace audio
 {
 namespace openal
 {
+
+#ifdef LOVE_ENABLE_LIBRETRO
+
+// The loopback entry points are an extension, so they are not in the library's
+// export table and have to be resolved at runtime.
+static LPALCLOOPBACKOPENDEVICESOFT alcLoopbackOpenDeviceSOFT = nullptr;
+static LPALCRENDERSAMPLESSOFT alcRenderSamplesSOFT = nullptr;
+
+#define LOAD_PROC(x) \
+	do { \
+		(x) = (decltype(x)) alcGetProcAddress(nullptr, #x); \
+		if ((x) == nullptr) \
+			throw love::Exception("OpenAL is missing %s", #x); \
+	} while (0)
+
+#endif // LOVE_ENABLE_LIBRETRO
 
 Audio::PoolThread::PoolThread(Pool *pool)
 	: pool(pool)
@@ -115,6 +135,40 @@ Audio::Audio()
 		love::thread::ScopedDisableSignals disableSignals;
 #endif
 
+#ifdef LOVE_ENABLE_LIBRETRO
+		// A libretro core owns no audio device: the frontend asks it for N samples
+		// per frame and mixes them itself. OpenAL Soft's loopback extension is
+		// exactly that contract -- it renders into a buffer we hand it, on demand,
+		// instead of driving a sound card.
+		//
+		// This is why LOVE's audio backend needed no rewriting: all of it (3D
+		// positioning, effects, filters, resampling) still runs unchanged. Only
+		// where the samples end up is different.
+		if (alcIsExtensionPresent(nullptr, "ALC_SOFT_loopback") != AL_TRUE)
+			throw love::Exception("OpenAL Soft with ALC_SOFT_loopback is required "
+			                      "for the libretro core.");
+
+		LOAD_PROC(alcLoopbackOpenDeviceSOFT);
+		LOAD_PROC(alcRenderSamplesSOFT);
+
+		device = alcLoopbackOpenDeviceSOFT(nullptr);
+
+		if (device == nullptr)
+			throw love::Exception("Could not open loopback device.");
+
+		// A loopback device has no hardware to inherit a format from, so the
+		// context must state it outright. These are not preferences: they are what
+		// libretro's audio callback is defined to take (interleaved stereo int16).
+		ALint attribs[] = {
+			ALC_FREQUENCY,             (ALint) love::libretro::SAMPLE_RATE,
+			ALC_FORMAT_CHANNELS_SOFT,  ALC_STEREO_SOFT,
+			ALC_FORMAT_TYPE_SOFT,      ALC_SHORT_SOFT,
+#ifdef ALC_EXT_EFX
+			ALC_MAX_AUXILIARY_SENDS,   MAX_SOURCE_EFFECTS,
+#endif
+			0
+		};
+#else
 		// Passing null for default device.
 		device = alcOpenDevice(nullptr);
 
@@ -126,6 +180,7 @@ Audio::Audio()
 #else
 		ALint *attribs = nullptr;
 #endif
+#endif // LOVE_ENABLE_LIBRETRO
 
 		context = alcCreateContext(device, attribs);
 
@@ -189,8 +244,15 @@ Audio::Audio()
 		throw;
 	}
 
+#ifndef LOVE_ENABLE_LIBRETRO
+	// No background thread under libretro. That thread exists to keep feeding a
+	// sound card that consumes on its own schedule; here nothing consumes anything
+	// until the frontend asks. The core pumps the pool once per frame instead
+	// (see renderSamples), which also keeps audio in lockstep with game logic
+	// rather than racing it.
 	poolThread = new PoolThread(pool);
 	poolThread->start();
+#endif
 	
 #ifdef LOVE_IOS
 	love::ios::initAudioSessionInterruptionHandler();
@@ -212,10 +274,13 @@ Audio::~Audio()
 #ifdef LOVE_IOS
 	love::ios::destroyAudioSessionInterruptionHandler();
 #endif
-	poolThread->setFinish();
-	poolThread->wait();
-
-	delete poolThread;
+	// Null under libretro: there is no background thread to stop.
+	if (poolThread != nullptr)
+	{
+		poolThread->setFinish();
+		poolThread->wait();
+		delete poolThread;
+	}
 	delete pool;
 
 	for (auto c : capture)
@@ -763,6 +828,27 @@ void Audio::initializeEFX()
 
 #endif
 }
+
+#ifdef LOVE_ENABLE_LIBRETRO
+
+void Audio::renderSamples(int16_t *buffer, int samples)
+{
+	if (device == nullptr || buffer == nullptr || samples <= 0)
+		return;
+
+	// Do by hand, once per frame, what the pool thread used to do in the
+	// background: hand finished buffers back to the sources and queue new ones.
+	// Skipping this would let sources run dry and stutter.
+	if (pool != nullptr)
+		pool->update();
+
+	// Render straight into the frontend's buffer. This is where OpenAL does all
+	// its mixing -- every source, effect and filter LOVE set up -- and the only
+	// difference from a normal build is the destination.
+	alcRenderSamplesSOFT(device, buffer, samples);
+}
+
+#endif // LOVE_ENABLE_LIBRETRO
 
 } // openal
 } // audio

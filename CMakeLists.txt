@@ -60,6 +60,29 @@ else()
 endif()
 option(LOVE_MPG123 "Use mpg123" TRUE)
 
+# Build LOVE as a libretro core (love_libretro.so) alongside the normal build.
+# Off by default: with it off nothing below changes, so a stock LOVE build is
+# untouched by the port.
+option(LOVE_LIBRETRO "Also build the libretro core" OFF)
+
+if(LOVE_LIBRETRO)
+	message(STATUS "libretro core: Enabled")
+
+	# Every LOVE translation unit has to see this, not just the core's own
+	# sources: the libretro backends in src/modules/<mod>/libretro/ are switched
+	# in by #ifdef on it, and the SDL/OpenAL ones switched out.
+	#
+	# Note the two names are not the same thing: LOVE_LIBRETRO is the CMake
+	# option (what you type), LOVE_ENABLE_LIBRETRO is the C++ macro (what the
+	# code tests) -- following LOVE's own LOVE_ENABLE_* convention.
+	add_definitions(-DLOVE_ENABLE_LIBRETRO)
+
+	include_directories(
+		${CMAKE_SOURCE_DIR}/platform/libretro
+		${CMAKE_SOURCE_DIR}/platform/libretro/include
+	)
+endif()
+
 if(LOVE_JIT)
 	if(APPLE)
 		message(WARNING "JIT not supported yet on Mac.")
@@ -187,12 +210,30 @@ Please see https://github.com/love2d/megasource
 	find_package(Freetype REQUIRED)
 	find_package(ModPlug REQUIRED)
 	find_package(OpenAL REQUIRED)
-	find_package(OpenGL REQUIRED)
-	find_package(SDL2 REQUIRED CONFIG COMPONENTS SDL2main)
 	find_package(Theora REQUIRED)
 	find_package(Vorbis REQUIRED)
 	find_package(ZLIB REQUIRED)
 	find_package(Ogg REQUIRED)
+
+	if(LOVE_LIBRETRO)
+		# Neither of these is needed by the core, and requiring them would stop it
+		# building on the boards it is aimed at.
+		#
+		# OpenGL: the core links no GL library at all. glad resolves every entry
+		# point at runtime through the address the frontend hands it, so the binary
+		# is agnostic between desktop GL and GLES -- which is what lets one build
+		# serve a PC and a Pi.
+		#
+		# SDL2: the frontend owns the window, the input and the audio device, so the
+		# SDL backends are compiled out entirely (see the LOVE_LIBRETRO branches
+		# further down). An ARM board running RetroArch has no reason to have SDL2
+		# development headers installed.
+		find_package(OpenGL)
+		find_package(SDL2 CONFIG COMPONENTS SDL2main)
+	else()
+		find_package(OpenGL REQUIRED)
+		find_package(SDL2 REQUIRED CONFIG COMPONENTS SDL2main)
+	endif()
 
 	# required for enet
 	add_definitions(-D HAS_SOCKLEN_T)
@@ -441,10 +482,25 @@ set(LOVE_SRC_MODULE_EVENT_SDL
 	src/modules/event/sdl/Event.h
 )
 
-set(LOVE_SRC_MODULE_EVENT
-	${LOVE_SRC_MODULE_EVENT_ROOT}
-	${LOVE_SRC_MODULE_EVENT_SDL}
+set(LOVE_SRC_MODULE_EVENT_LIBRETRO
+	src/modules/event/libretro/Event.cpp
+	src/modules/event/libretro/Event.h
 )
+
+# The libretro backend replaces the SDL one rather than sitting next to it: both
+# define the same class, only one can be instantiated, and linking both would
+# just drag SDL into the core for nothing.
+if(LOVE_LIBRETRO)
+	set(LOVE_SRC_MODULE_EVENT
+		${LOVE_SRC_MODULE_EVENT_ROOT}
+		${LOVE_SRC_MODULE_EVENT_LIBRETRO}
+	)
+else()
+	set(LOVE_SRC_MODULE_EVENT
+		${LOVE_SRC_MODULE_EVENT_ROOT}
+		${LOVE_SRC_MODULE_EVENT_SDL}
+	)
+endif()
 
 source_group("modules\\event" FILES ${LOVE_SRC_MODULE_EVENT_ROOT})
 source_group("modules\\event\\sdl" FILES ${LOVE_SRC_MODULE_EVENT_SDL})
@@ -705,10 +761,29 @@ set(LOVE_SRC_MODULE_JOYSTICK_SDL
 	src/modules/joystick/sdl/JoystickModule.h
 )
 
-set(LOVE_SRC_MODULE_JOYSTICK
-	${LOVE_SRC_MODULE_JOYSTICK_ROOT}
-	${LOVE_SRC_MODULE_JOYSTICK_SDL}
+set(LOVE_SRC_MODULE_JOYSTICK_LIBRETRO
+	src/modules/joystick/libretro/Joystick.cpp
+	src/modules/joystick/libretro/Joystick.h
+	src/modules/joystick/libretro/JoystickModule.cpp
+	src/modules/joystick/libretro/JoystickModule.h
 )
+
+# The SDL joystick backend calls SDL_InitSubSystem(SDL_INIT_JOYSTICK). It is not
+# fatal the way the mouse one is, but it opens the player's controllers a second
+# time behind the frontend's back -- which is both wasteful and a good way to get
+# doubled input. The frontend has already normalised every controller into a
+# RetroPad; that is the only pad the core should see.
+if(LOVE_LIBRETRO)
+	set(LOVE_SRC_MODULE_JOYSTICK
+		${LOVE_SRC_MODULE_JOYSTICK_ROOT}
+		${LOVE_SRC_MODULE_JOYSTICK_LIBRETRO}
+	)
+else()
+	set(LOVE_SRC_MODULE_JOYSTICK
+		${LOVE_SRC_MODULE_JOYSTICK_ROOT}
+		${LOVE_SRC_MODULE_JOYSTICK_SDL}
+	)
+endif()
 
 source_group("modules\\joystick" FILES ${LOVE_SRC_MODULE_JOYSTICK_ROOT})
 source_group("modules\\joystick\\sdl" FILES ${LOVE_SRC_MODULE_JOYSTICK_SDL})
@@ -729,10 +804,25 @@ set(LOVE_SRC_MODULE_KEYBOARD_SDL
 	src/modules/keyboard/sdl/Keyboard.h
 )
 
-set(LOVE_SRC_MODULE_KEYBOARD
-	${LOVE_SRC_MODULE_KEYBOARD_ROOT}
-	${LOVE_SRC_MODULE_KEYBOARD_SDL}
+set(LOVE_SRC_MODULE_KEYBOARD_LIBRETRO
+	src/modules/keyboard/libretro/Keyboard.cpp
+	src/modules/keyboard/libretro/Keyboard.h
 )
+
+# The libretro backend replaces the SDL one rather than sitting next to it: both
+# define the same class, only one can be instantiated, and linking both would
+# just drag SDL into the core for nothing.
+if(LOVE_LIBRETRO)
+	set(LOVE_SRC_MODULE_KEYBOARD
+		${LOVE_SRC_MODULE_KEYBOARD_ROOT}
+		${LOVE_SRC_MODULE_KEYBOARD_LIBRETRO}
+	)
+else()
+	set(LOVE_SRC_MODULE_KEYBOARD
+		${LOVE_SRC_MODULE_KEYBOARD_ROOT}
+		${LOVE_SRC_MODULE_KEYBOARD_SDL}
+	)
+endif()
 
 source_group("modules\\keyboard" FILES ${LOVE_SRC_MODULE_KEYBOARD_ROOT})
 source_group("modules\\keyboard\\sdl" FILES ${LOVE_SRC_MODULE_KEYBOARD_SDL})
@@ -793,10 +883,25 @@ set(LOVE_SRC_MODULE_MOUSE_SDL
 	src/modules/mouse/sdl/Mouse.h
 )
 
-set(LOVE_SRC_MODULE_MOUSE
-	${LOVE_SRC_MODULE_MOUSE_ROOT}
-	${LOVE_SRC_MODULE_MOUSE_SDL}
+set(LOVE_SRC_MODULE_MOUSE_LIBRETRO
+	src/modules/mouse/libretro/Mouse.cpp
+	src/modules/mouse/libretro/Mouse.h
 )
+
+# The SDL mouse backend calls SDL_InitSubSystem(SDL_INIT_VIDEO) in its
+# constructor, which fails on a board with no display server and takes the whole
+# core down with it. Replacing it is what lets the core start on ARM at all.
+if(LOVE_LIBRETRO)
+	set(LOVE_SRC_MODULE_MOUSE
+		${LOVE_SRC_MODULE_MOUSE_ROOT}
+		${LOVE_SRC_MODULE_MOUSE_LIBRETRO}
+	)
+else()
+	set(LOVE_SRC_MODULE_MOUSE
+		${LOVE_SRC_MODULE_MOUSE_ROOT}
+		${LOVE_SRC_MODULE_MOUSE_SDL}
+	)
+endif()
 
 source_group("modules\\mouse" FILES ${LOVE_SRC_MODULE_MOUSE_ROOT})
 source_group("modules\\mouse\\sdl" FILES ${LOVE_SRC_MODULE_MOUSE_SDL})
@@ -1107,10 +1212,25 @@ set(LOVE_SRC_MODULE_WINDOW_SDL
 	src/modules/window/sdl/Window.h
 )
 
-set(LOVE_SRC_MODULE_WINDOW
-	${LOVE_SRC_MODULE_WINDOW_ROOT}
-	${LOVE_SRC_MODULE_WINDOW_SDL}
+set(LOVE_SRC_MODULE_WINDOW_LIBRETRO
+	src/modules/window/libretro/Window.cpp
+	src/modules/window/libretro/Window.h
 )
+
+# The libretro backend replaces the SDL one rather than sitting next to it: both
+# define the same class, only one can be instantiated, and linking both would
+# just drag SDL into the core for nothing.
+if(LOVE_LIBRETRO)
+	set(LOVE_SRC_MODULE_WINDOW
+		${LOVE_SRC_MODULE_WINDOW_ROOT}
+		${LOVE_SRC_MODULE_WINDOW_LIBRETRO}
+	)
+else()
+	set(LOVE_SRC_MODULE_WINDOW
+		${LOVE_SRC_MODULE_WINDOW_ROOT}
+		${LOVE_SRC_MODULE_WINDOW_SDL}
+	)
+endif()
 
 source_group("modules\\window" FILES ${LOVE_SRC_MODULE_WINDOW_ROOT})
 source_group("modules\\window\\sdl" FILES ${LOVE_SRC_MODULE_WINDOW_SDL})
@@ -1788,6 +1908,45 @@ endif()
 add_library(${LOVE_LIB_NAME} SHARED ${LOVE_LIB_SRC} ${LOVE_RC})
 set_target_properties(${LOVE_LIB_NAME} PROPERTIES C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 target_link_libraries(${LOVE_LIB_NAME} ${LOVE_LINK_LIBRARIES} ${LOVE_3P})
+
+#
+# love_libretro (libretro core)
+#
+# A second target built from the same sources as liblove, rather than linking
+# against liblove.so. liblove is built with hidden visibility and is not
+# standalone -- it leaves hundreds of symbols for the love executable to resolve
+# at link time, so a dlopen()ed core cannot use it.
+#
+if(LOVE_LIBRETRO)
+	add_library(love_libretro SHARED
+		${LOVE_LIB_SRC}
+		platform/libretro/libretro_core.cpp
+		platform/libretro/libretro_boot.cpp
+		platform/libretro/libretro_input.cpp
+		platform/libretro/libretro_audio.cpp
+		platform/libretro/libretro_state.h
+	)
+
+	target_link_libraries(love_libretro ${LOVE_LINK_LIBRARIES} ${LOVE_3P})
+
+	# RetroArch wants love_libretro.so, not liblove_libretro.so.
+	#
+	# Note there is deliberately no hidden-visibility preset here, unlike liblove:
+	# hidden visibility demotes weak symbols (vtables, typeinfo) to local, which
+	# breaks resolution between LOVE's own translation units. The version script
+	# below is what controls the exported surface, and it does that job without
+	# touching how symbols resolve internally.
+	set_target_properties(love_libretro PROPERTIES
+		PREFIX ""
+		OUTPUT_NAME "love_libretro"
+	)
+
+	if(UNIX AND NOT APPLE)
+		target_link_options(love_libretro PRIVATE
+			"-Wl,--version-script=${CMAKE_SOURCE_DIR}/platform/libretro/link.T"
+		)
+	endif()
+endif()
 
 if(LOVE_EXTRA_DEPENDECIES)
 	add_dependencies(${LOVE_LIB_NAME} ${LOVE_EXTRA_DEPENDECIES})
