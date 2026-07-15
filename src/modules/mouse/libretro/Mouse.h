@@ -35,7 +35,7 @@ namespace libretro
 {
 
 // The SDL mouse backend calls SDL_InitSubSystem(SDL_INIT_VIDEO) in its
-// constructor. On a Recalbox board there is no display server for SDL to
+// constructor. On a board with no display server there is nothing for SDL to
 // initialise against, so that call fails and takes the whole core down with it
 // -- before a single frame is drawn. That, not the mouse itself, is why this
 // backend exists.

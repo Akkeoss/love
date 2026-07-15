@@ -1933,6 +1933,7 @@ if(LOVE_LIBRETRO)
 		platform/libretro/libretro_core.cpp
 		platform/libretro/libretro_boot.cpp
 		platform/libretro/libretro_input.cpp
+		platform/libretro/libretro_options.cpp
 		platform/libretro/libretro_audio.cpp
 		platform/libretro/libretro_state.h
 	)

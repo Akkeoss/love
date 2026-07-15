@@ -16,6 +16,7 @@ add_library(love_libretro SHARED
 	libretro_core.cpp
 	libretro_boot.cpp
 	libretro_input.cpp
+	libretro_options.cpp
 	libretro_audio.cpp
 	libretro_state.h
 

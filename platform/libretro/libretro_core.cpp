@@ -25,6 +25,7 @@
 #include <libretro.h>
 
 #include "libretro_state.h"
+#include "libretro_options.h"
 
 #include <cstdio>
 #include <cstring>
@@ -129,17 +130,27 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "Up (arrow key)" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "Down (arrow key)" },
 		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "Right (arrow key)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "z / space" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "x / lshift" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "c" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "v" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "return" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "escape" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "q" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "e" },
+		// These say "keyboard key" rather than a specific key, because the key each
+		// button sends is now a core option the player sets (see options). Naming a
+		// fixed key here would just be a lie once they change it.
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "Keyboard key (see options)" },
 		{ 0 },
 	};
 	cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, (void *) desc);
+
+	// One core option per action button, letting the player pick the key it
+	// sends. Different .love games want different keys (Mr. Rescue wants s/d/a,
+	// the defaults are z/x/...), and RetroArch's own control remapper cannot help
+	// here: it maps buttons to buttons, and has no idea what key a game listens
+	// for. Only the core knows that, so only the core can expose the choice.
+	love::libretro::options_set(cb);
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb)  { video_cb = cb; }
@@ -216,7 +227,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
 	// Ask the frontend for a context, best first, and take what it gives.
 	//
-	// One binary has to serve every board Recalbox runs on, and they do not agree
+	// One binary has to serve every board this might run on, and they do not agree
 	// on what GL they have: a PC offers desktop GL 3.3 and no GLES worth using; a
 	// Pi offers GLES 3 and no desktop GL at all. Rather than shipping a core per
 	// board, negotiate -- the frontend rejects what it cannot provide, so trying
@@ -268,6 +279,11 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 		return false;
 	}
 
+	// Read the initial button mapping now that the frontend has taken the option
+	// definitions. Without this first read the mapping stays at its compiled-in
+	// defaults until the player happens to open the options menu.
+	love::libretro::options_update(environ_cb);
+
 	// LOVE itself is booted in context_reset, not here: there is no GL context
 	// yet, and love.graphics cannot come up without one.
 	game_loaded = true;
@@ -294,6 +310,13 @@ RETRO_API void retro_run()
 		return;
 	}
 
+	// Re-read the button mapping if the player changed it mid-game. The frontend
+	// raises this flag rather than making us poll every option every frame.
+	bool options_changed = false;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &options_changed)
+	    && options_changed)
+		love::libretro::options_update(environ_cb);
+
 	// Publish this frame's input so the libretro input backends can read it
 	// during the frame LOVE is about to run.
 	love::libretro::state.input_state_cb = input_state_cb;
@@ -306,9 +329,12 @@ RETRO_API void retro_run()
 	// One resume of LOVE's boot coroutine == exactly one frame.
 	if (!love::libretro::run_frame())
 	{
-		// LOVE quit (love.event.quit, or an error). Tell the frontend to close
-		// the core rather than spinning on a dead Lua state.
-		log_cb(RETRO_LOG_INFO, "[LOVE] finished -- shutting down\n");
+		// We get here only when LOVE really cannot continue -- a Lua error, or the
+		// boot script ending -- not when a game merely calls love.event.quit
+		// (our love.run swallows that; the player leaves through the frontend).
+		// A dead Lua state cannot render, so the only sane thing left is to close
+		// the core rather than spin on it.
+		log_cb(RETRO_LOG_INFO, "[LOVE] cannot continue -- shutting down\n");
 		environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr);
 		video_cb(nullptr, love::libretro::state.width,
 		         love::libretro::state.height, 0);

@@ -78,7 +78,7 @@ bool Mouse::isCursorSupported() const
 // libretro's mouse reports movement as a delta per frame, not an absolute
 // position, so an absolute one has to be accumulated here and clamped to the
 // screen. RETRO_DEVICE_POINTER would give absolute coordinates but only for
-// touch devices; the mouse is the more common case on a Recalbox box.
+// touch devices; the mouse is the more common case on a handheld or a box.
 
 namespace {
 
