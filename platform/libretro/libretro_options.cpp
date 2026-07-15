@@ -90,21 +90,27 @@ constexpr int NUM_BUTTONS = (int) (sizeof(BUTTONS) / sizeof(BUTTONS[0]));
 const char *CATEGORY_KEY = "input_mapping";
 const char *TIMING_CATEGORY_KEY = "timing";
 
+// "60" resolves to the exact NTSC rate, not a round 60.0. crtswitchres builds
+// its modeline from the fps we report, and a round 60.0 makes a real CRT sync
+// unstably; 60.0988 is the rate a CRT actually runs at. The difference is
+// invisible to a game's logic (0.16%) but decisive for the display.
+constexpr double NTSC_FPS = 60.0988;
+
 // The target fps option. A .love game never declares its intended frame rate, so
 // there is nothing to detect automatically; 60 is what almost every game is
 // written for, and the other values are there for the rare game built for 30, or
 // to match a 50 Hz display. Filled by options_update().
-double current_fps = 60.0;
+double current_fps = NTSC_FPS;
 
 double fps_from_name(const char *name)
 {
 	if (name == nullptr)
-		return 60.0;
+		return NTSC_FPS;
 	if (std::strcmp(name, "50") == 0)
 		return 50.0;
 	if (std::strcmp(name, "30") == 0)
 		return 30.0;
-	return 60.0;
+	return NTSC_FPS;
 }
 
 int key_from_name(const char *name)

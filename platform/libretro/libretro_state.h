@@ -18,12 +18,7 @@
 namespace love {
 namespace libretro {
 
-#define LOVE_LIBRETRO_VERSION "1.2"
-
-// The FBO is allocated once at this size and never grown, so it has to cover
-// anything a game might ask for. 1080p is the ceiling on the boards we target.
-constexpr unsigned MAX_WIDTH  = 1920;
-constexpr unsigned MAX_HEIGHT = 1080;
+#define LOVE_LIBRETRO_VERSION "1.3"
 
 // libretro fixes the sample rate for the lifetime of the core, so LOVE's audio
 // backend has to resample to this rather than pick its own.
@@ -36,7 +31,7 @@ struct State
 	// case the core tells the frontend via SET_GEOMETRY.
 	unsigned width  = 800;
 	unsigned height = 600;
-	double   fps    = 60.0;
+	double   fps    = 60.0988;
 
 	// The GL context lives in the frontend. LOVE resolves its GL entry points
 	// through get_proc_address, and must render into the FBO that
@@ -71,7 +66,7 @@ struct State
 	// measured wall-clock delta. Feeding LOVE the real elapsed time would make
 	// the game speed up whenever the frontend runs the core faster than
 	// realtime (fast-forward, or a headless test).
-	double dt = 1.0 / 60.0;
+	double dt = 1.0 / 60.0988;
 
 	// --- Paths ---------------------------------------------------------
 	std::string system_dir;

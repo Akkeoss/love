@@ -78,7 +78,7 @@ void apply_fps()
 {
 	double fps = love::libretro::option_fps();
 	if (fps <= 0.0)
-		fps = 60.0;
+		fps = 60.0988;
 
 	love::libretro::state.fps = fps;
 	love::libretro::state.dt  = 1.0 / fps;
@@ -217,10 +217,15 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info)
 {
 	std::memset(info, 0, sizeof(*info));
 
+	// This is the first, provisional geometry: LOVE has not booted yet, so the
+	// real size is not known and state.width/height are still the defaults. max is
+	// reported equal to base so the framebuffer starts exactly the right size for
+	// the CRT case (see the resize block in retro_run). The instant LOVE boots and
+	// reports its actual resolution, SET_SYSTEM_AV_INFO reallocates to it.
 	info->geometry.base_width   = love::libretro::state.width;
 	info->geometry.base_height  = love::libretro::state.height;
-	info->geometry.max_width    = love::libretro::MAX_WIDTH;
-	info->geometry.max_height   = love::libretro::MAX_HEIGHT;
+	info->geometry.max_width    = love::libretro::state.width;
+	info->geometry.max_height   = love::libretro::state.height;
 	info->geometry.aspect_ratio = (float) love::libretro::state.width
 	                            / (float) love::libretro::state.height;
 
@@ -369,8 +374,22 @@ RETRO_API void retro_run()
 	// at 1024x768 into a framebuffer the frontend still believes is 800x600, and
 	// the player gets a cropped or stretched picture with nothing to explain it.
 	//
-	// SET_GEOMETRY is the cheap call for this: it updates the size without
-	// reinitialising audio or the GL context, which SET_SYSTEM_AV_INFO would do.
+	// SET_SYSTEM_AV_INFO, not SET_GEOMETRY. The difference is the whole fix for
+	// the CRT-SwitchRes offset:
+	//
+	// SET_GEOMETRY only re-crops within the existing framebuffer, whose size is
+	// the *max* we first reported. We used to report a 1920x1080 max, so the
+	// framebuffer stayed 1920x1080 while a game drew into an 800x600 corner of it.
+	// On HDMI the frontend crops to base and centres, so it looked fine. On a CRT,
+	// crtswitchres builds its modeline from that oversized framebuffer and the
+	// image ends up pushed down the screen.
+	//
+	// SET_SYSTEM_AV_INFO lets us set max = base, which makes the frontend
+	// reallocate the framebuffer to exactly the game's size -- no empty margin for
+	// either display to misframe. libretro documents this as the way to support
+	// configurable resolutions without guessing a worst-case max up front. It
+	// reinitialises the GL context (context_reset fires again, LOVE reboots), so
+	// it is only done when the size actually changes, not every frame.
 	{
 		static unsigned last_w = 0;
 		static unsigned last_h = 0;
@@ -380,16 +399,19 @@ RETRO_API void retro_run()
 
 		if ((w != last_w || h != last_h) && w > 0 && h > 0)
 		{
-			struct retro_game_geometry geom = {};
-			geom.base_width   = w;
-			geom.base_height  = h;
-			geom.max_width    = love::libretro::MAX_WIDTH;
-			geom.max_height   = love::libretro::MAX_HEIGHT;
-			geom.aspect_ratio = (float) w / (float) h;
+			struct retro_system_av_info av;
+			std::memset(&av, 0, sizeof(av));
+			av.geometry.base_width   = w;
+			av.geometry.base_height  = h;
+			av.geometry.max_width    = w;   // = base: framebuffer is exactly the game
+			av.geometry.max_height   = h;
+			av.geometry.aspect_ratio = (float) w / (float) h;
+			av.timing.fps            = love::libretro::state.fps;
+			av.timing.sample_rate    = love::libretro::SAMPLE_RATE;
 
-			environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+			environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
 
-			log_cb(RETRO_LOG_INFO, "[LOVE] geometry: %ux%u\n", w, h);
+			log_cb(RETRO_LOG_INFO, "[LOVE] geometry: %ux%u (fbo resized)\n", w, h);
 
 			last_w = w;
 			last_h = h;
