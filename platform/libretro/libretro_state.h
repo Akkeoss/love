@@ -18,7 +18,7 @@
 namespace love {
 namespace libretro {
 
-#define LOVE_LIBRETRO_VERSION "0.1"
+#define LOVE_LIBRETRO_VERSION "1.2"
 
 // The FBO is allocated once at this size and never grown, so it has to cover
 // anything a game might ask for. 1080p is the ceiling on the boards we target.

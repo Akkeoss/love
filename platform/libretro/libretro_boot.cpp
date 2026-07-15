@@ -135,6 +135,19 @@ bool boot(const std::string &game_path)
 	lua_pushboolean(L, 1);
 	lua_setfield(L, -2, "_exe");
 
+	// love._libretro_dt(): the seconds-per-frame the game's update() should use.
+	//
+	// It is a function, not a constant, so it always returns the current value --
+	// the player can change the target fps mid-game through a core option. And it
+	// is derived from that fps rather than measured off a wall clock: the frontend
+	// paces us, so feeding LOVE the real elapsed time would make a game speed up
+	// whenever the core runs faster than realtime (fast-forward, a headless test).
+	lua_pushcfunction(L, [](lua_State *ls) -> int {
+		lua_pushnumber(ls, state.dt);
+		return 1;
+	});
+	lua_setfield(L, -2, "_libretro_dt");
+
 	// The love.run the frontend needs, published as love._libretro_run.
 	//
 	// boot.lua installs this over whatever love.run the game defined, right
@@ -153,8 +166,10 @@ bool boot(const std::string &game_path)
 		"love._libretro_run = function()\n"
 		"  if love.load then love.load(love.arg.parseGameArguments(arg), arg) end\n"
 		"  if love.timer then love.timer.step() end\n"
-		"  local dt = love._libretro_dt or (1/60)\n"
 		"  return function()\n"
+		"    -- dt is asked for every frame, not captured once: the player can\n"
+		"    -- change the target fps mid-game, and this reflects it immediately.\n"
+		"    local dt = love._libretro_dt and love._libretro_dt() or (1/60)\n"
 		"    if love.event then\n"
 		"      love.event.pump()\n"
 		"      for name, a,b,c,d,e,f in love.event.poll() do\n"

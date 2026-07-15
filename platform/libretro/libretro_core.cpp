@@ -70,6 +70,20 @@ bool gl_context_ready = false;
 std::string game_path;
 bool game_loaded = false;
 
+// Push the fps the player chose into the shared state, and derive the game's dt
+// from it. Both are read elsewhere: state.fps by retro_get_system_av_info (what
+// the frontend paces us at), state.dt by love._libretro_dt (what update() gets).
+// Call after every options_update.
+void apply_fps()
+{
+	double fps = love::libretro::option_fps();
+	if (fps <= 0.0)
+		fps = 60.0;
+
+	love::libretro::state.fps = fps;
+	love::libretro::state.dt  = 1.0 / fps;
+}
+
 void context_reset()
 {
 	log_cb(RETRO_LOG_INFO, "[LOVE] context_reset: GL context is live\n");
@@ -190,7 +204,7 @@ RETRO_API void retro_get_system_info(struct retro_system_info *info)
 {
 	std::memset(info, 0, sizeof(*info));
 	info->library_name     = "LOVE";
-	info->library_version   = LOVE_LIBRETRO_VERSION;
+	info->library_version  = LOVE_LIBRETRO_VERSION;
 	info->valid_extensions = "love|zip";
 
 	// LOVE mounts the game through PhysFS from its path, so we need the path on
@@ -279,10 +293,13 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 		return false;
 	}
 
-	// Read the initial button mapping now that the frontend has taken the option
-	// definitions. Without this first read the mapping stays at its compiled-in
-	// defaults until the player happens to open the options menu.
+	// Read the initial options now that the frontend has taken the definitions.
+	// Without this first read they stay at their compiled-in defaults until the
+	// player happens to open the options menu. Reading fps here in particular
+	// matters, because retro_get_system_av_info -- called right after this -- will
+	// report state.fps to the frontend.
 	love::libretro::options_update(environ_cb);
+	apply_fps();
 
 	// LOVE itself is booted in context_reset, not here: there is no GL context
 	// yet, and love.graphics cannot come up without one.
@@ -315,7 +332,10 @@ RETRO_API void retro_run()
 	bool options_changed = false;
 	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &options_changed)
 	    && options_changed)
+	{
 		love::libretro::options_update(environ_cb);
+		apply_fps();
+	}
 
 	// Publish this frame's input so the libretro input backends can read it
 	// during the frame LOVE is about to run.

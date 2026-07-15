@@ -12,11 +12,18 @@
 namespace love {
 namespace libretro {
 
-// Category shown as a sub-menu.
+// Categories shown as sub-menus.
 #define LOVE_FR_CATEGORY_INPUT_NAME "Touches (manette -> clavier)"
 #define LOVE_FR_CATEGORY_INPUT_INFO \
 	"Quelle touche du clavier chaque bouton de la manette envoie. A regler " \
 	"selon les touches attendues par le jeu."
+
+#define LOVE_FR_CATEGORY_TIMING_NAME "Cadence"
+#define LOVE_FR_CATEGORY_TIMING_INFO \
+	"Frequence d'images. Laisser a 60 sauf si un jeu va trop vite, ou pour " \
+	"correspondre a un ecran 50 Hz."
+
+#define LOVE_FR_FPS_LABEL "Images par seconde"
 
 // One label per button, in the same order as BUTTONS[] in libretro_options.cpp.
 static const char *LOVE_FR_BUTTON_LABELS[] =

@@ -28,5 +28,10 @@ void options_update(retro_environment_t environ_cb);
 // RETRO_DEVICE_ID_JOYPAD_* value. Read by update_input().
 int option_key_for_button(unsigned id);
 
+// The target frames per second the player selected (60, 50 or 30). The core
+// reports this to the frontend as the content's fps, and derives the game's dt
+// from it. Valid after the first options_update().
+double option_fps();
+
 } // namespace libretro
 } // namespace love
