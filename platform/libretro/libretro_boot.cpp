@@ -23,6 +23,7 @@
 #include "common/version.h"
 #include "common/runtime.h"
 #include "modules/love/love.h"
+#include "libraries/physfs/physfs.h"
 
 extern "C" {
 	#include <lua.h>
@@ -42,6 +43,12 @@ namespace {
 lua_State *L = nullptr;     // the main Lua state
 lua_State *boot_co = nullptr; // the boot coroutine we resume each frame
 bool running = false;
+
+// The directory that physically holds the .love (or the unpacked game folder).
+// Mounted alongside the game so a data file dropped next to the .love shows up in
+// love.filesystem -- see mount_game_directory() for why.
+std::string game_dir;
+bool game_dir_mounted = false;
 
 // Where love.boot's coroutine sits on L's stack. Kept so we can pop whatever a
 // yield leaves behind, exactly as runlove() does.
@@ -73,6 +80,98 @@ void log(enum retro_log_level level, const char *fmt, ...)
 	state.log(level, "%s", buf);
 }
 
+// The directory part of a path, or "." when there is no separator. Handles both
+// separators so it is correct whichever platform packaged the path.
+std::string parent_directory(const std::string &path)
+{
+	size_t slash = path.find_last_of("/\\");
+	if (slash == std::string::npos)
+		return ".";
+	if (slash == 0)
+		return "/";           // path is at the filesystem root
+	return path.substr(0, slash);
+}
+
+// Mount the .love's own directory at the root of LOVE's search path.
+//
+// Some .love games look for user-supplied data by scanning the filesystem root
+// (love.filesystem.getDirectoryItems("")) rather than asking for a path -- e.g. a
+// game that imports a ROM or a save the player drops in. PhysFS only ever sees the
+// .love archive and the save directory, so such a file is invisible unless we make
+// its directory part of the search path.
+//
+// The frontend hands a .love to a core the same way it hands a game to any other
+// core: as a single file the player put in a roms folder. The natural place for
+// that player to drop a companion file is right next to it -- so we mount the
+// .love's parent directory. It is appended (appendToPath = 1), so the game's own
+// files always win a name clash; the extra directory only adds names the game did
+// not already provide. Read-only is fine and in fact safer: that folder may live on
+// a read-only medium, and LOVE still writes to its save directory as before.
+//
+// PhysFS is not initialised until LOVE's boot coroutine has run, so this is done
+// lazily on the first frame rather than in boot().
+void mount_game_directory()
+{
+	if (game_dir_mounted || game_dir.empty() || !PHYSFS_isInit())
+		return;
+
+	// One shot regardless of outcome: if the mount fails there is nothing to
+	// retry, and we must not spam PhysFS every frame.
+	game_dir_mounted = true;
+
+	if (PHYSFS_mount(game_dir.c_str(), nullptr, 1) == 0)
+	{
+		log(RETRO_LOG_WARN, "[LOVE] could not mount game directory %s: %s\n",
+			game_dir.c_str(),
+			PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
+	}
+	else
+	{
+		log(RETRO_LOG_INFO, "[LOVE] mounted game directory %s\n",
+			game_dir.c_str());
+	}
+}
+
+// Run the game's love.quit once, if it has one.
+//
+// A game that spawns love.thread workers stops them in love.quit -- it pushes a
+// "quit" message onto their channel and joins them (love does not join threads for
+// you; they are detached). Normally love.quit runs when the game itself quits, but
+// this core suppresses that path on purpose: the player leaves through the frontend,
+// not by the game closing itself. So at teardown we have to run love.quit ourselves,
+// before lua_close, or a worker still sitting in love.timer.sleep wakes up after the
+// state and SDL have been torn down and faults. Stock love has the same hazard on
+// exit (see the comment in runlove()); it only gets away with it because the process
+// exits immediately after. A core does not: the frontend keeps running.
+//
+// Protected and best-effort: a game with no love.quit, or one that errors in it, must
+// not turn teardown into a crash of its own.
+void run_quit_handler()
+{
+	if (!L)
+		return;
+
+	lua_getglobal(L, "love");
+	if (lua_istable(L, -1))
+	{
+		lua_getfield(L, -1, "quit");
+		if (lua_isfunction(L, -1))
+		{
+			if (lua_pcall(L, 0, 0, 0) != 0)
+			{
+				log(RETRO_LOG_WARN, "[LOVE] love.quit error at teardown: %s\n",
+					lua_tostring(L, -1));
+				lua_pop(L, 1);
+			}
+		}
+		else
+		{
+			lua_pop(L, 1);   // love.quit was not a function
+		}
+	}
+	lua_pop(L, 1);           // love
+}
+
 } // anonymous namespace
 
 bool is_running()
@@ -84,6 +183,12 @@ bool boot(const std::string &game_path)
 {
 	if (L)
 		shutdown();
+
+	// Remember where the game lives so its directory can be mounted once PhysFS is
+	// up (see mount_game_directory). An empty game_path is the nogame screen, which
+	// has no directory to mount.
+	game_dir = game_path.empty() ? "" : parent_directory(game_path);
+	game_dir_mounted = false;
 
 	L = luaL_newstate();
 	if (!L)
@@ -237,6 +342,10 @@ bool run_frame()
 	if (!is_running())
 		return false;
 
+	// PhysFS comes up during the boot coroutine, so the earliest we can add to the
+	// search path is here, on the frames after boot() -- not in boot() itself.
+	mount_game_directory();
+
 	int nres = 0;
 	int status = luax_resume(boot_co, 0, &nres);
 
@@ -268,6 +377,10 @@ void shutdown()
 {
 	if (!L)
 		return;
+
+	// Let the game stop its own threads before we free the state out from under
+	// them. See run_quit_handler().
+	run_quit_handler();
 
 	lua_close(L);
 	L = nullptr;
