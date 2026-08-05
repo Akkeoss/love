@@ -25,6 +25,13 @@ namespace libretro {
 
 #define LOVE_FR_FPS_LABEL "Images par seconde"
 
+#define LOVE_FR_CATEGORY_VIDEO_NAME "Affichage"
+#define LOVE_FR_CATEGORY_VIDEO_INFO \
+	"Rendu. Baisser l'echelle de rendu allege beaucoup un jeu 3D lourd, au " \
+	"prix de la nettete."
+
+#define LOVE_FR_SCALE_LABEL "Echelle de rendu"
+
 // One label per button, in the same order as BUTTONS[] in libretro_options.cpp.
 static const char *LOVE_FR_BUTTON_LABELS[] =
 {

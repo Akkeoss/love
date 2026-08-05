@@ -20,6 +20,12 @@
 
 #include "Thread.h"
 
+#ifdef LOVE_ENABLE_LIBRETRO
+// SDL_GetTicks / SDL_Delay, for the bounded join in ~Thread. Thread.h only
+// pulls in SDL_thread.h.
+#include <SDL.h>
+#endif
+
 namespace love
 {
 namespace thread
@@ -37,7 +43,39 @@ Thread::~Thread()
 {
 	// Clean up handle
 	if (thread)
+	{
+#ifdef LOVE_ENABLE_LIBRETRO
+		// Wait, do not detach.
+		//
+		// Detaching says "nobody will ever join this thread" -- true for the
+		// executable, which is about to exit() and take the address space with
+		// it. A core has no exit(): the frontend dlclose()s us and keeps running,
+		// so a thread still inside this library then executes unmapped pages.
+		// That is a SIGSEGV *after* the frontend's last "unloading core" line,
+		// which reads as a crash on exit with nothing to explain it. Seen on real
+		// hardware, with the kernel naming the game's own audio worker.
+		//
+		// Not bounded on purpose: a timeout only narrows the race, it does not
+		// close it. What makes an unbounded wait safe is the teardown order --
+		// love.quit runs first (libretro_boot.cpp calls it, and pushes a quit to
+		// the worker channels itself), lua_close after -- so a thread reaching
+		// here has already been told to stop. LOVE thread bodies are loops that
+		// end on that signal, not blocking waits.
+		//
+		// Except when the caller IS the thread. thread_runner ends with
+		// t->release(), and if that drops the last reference the Threadable
+		// destructs on the worker itself, reaching here through ~Threadable's
+		// `delete owner`. Joining yourself is undefined, and detaching is safe in
+		// that one case for the reason it is unsafe otherwise: the thread is
+		// already leaving threadFunction, so no body is left to run.
+		if (SDL_GetThreadID(thread) == SDL_ThreadID())
+			SDL_DetachThread(thread);
+		else
+			SDL_WaitThread(thread, nullptr);
+#else
 		SDL_DetachThread(thread);
+#endif
+	}
 }
 
 bool Thread::start()

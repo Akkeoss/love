@@ -33,5 +33,10 @@ int option_key_for_button(unsigned id);
 // from it. Valid after the first options_update().
 double option_fps();
 
+// The render scale the player selected (1.0, 0.75, 0.66 or 0.5). Applied to the
+// size a game requests from love.window.setMode; the frontend upscales the
+// smaller frame. Valid after the first options_update().
+double option_render_scale();
+
 } // namespace libretro
 } // namespace love

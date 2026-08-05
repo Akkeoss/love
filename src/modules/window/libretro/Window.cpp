@@ -85,6 +85,19 @@ bool Window::setWindow(int w, int h, WindowSettings *settings)
 	// do when its resolution changes.
 	if (w > 0 && h > 0)
 	{
+		// The player's render scale shrinks the size the game gets. The game lays
+		// out and renders for the reduced size -- every canvas and full-screen
+		// pass it creates shrinks with it -- and the frontend upscales the result.
+		// Kept even so pixel-doubling games stay on integer boundaries.
+		double scale = love::libretro::state.render_scale;
+		if (scale > 0.0 && scale < 1.0)
+		{
+			w = ((int) (w * scale)) & ~1;
+			h = ((int) (h * scale)) & ~1;
+			if (w < 2) w = 2;
+			if (h < 2) h = 2;
+		}
+
 		width  = w;
 		height = h;
 

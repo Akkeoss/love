@@ -13,6 +13,7 @@
 #include "libretro_state.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -89,6 +90,7 @@ constexpr int NUM_BUTTONS = (int) (sizeof(BUTTONS) / sizeof(BUTTONS[0]));
 
 const char *CATEGORY_KEY = "input_mapping";
 const char *TIMING_CATEGORY_KEY = "timing";
+const char *VIDEO_CATEGORY_KEY = "video";
 
 // "60" resolves to the exact NTSC rate, not a round 60.0. crtswitchres builds
 // its modeline from the fps we report, and a round 60.0 makes a real CRT sync
@@ -101,6 +103,7 @@ constexpr double NTSC_FPS = 60.0988;
 // written for, and the other values are there for the rare game built for 30, or
 // to match a 50 Hz display. Filled by options_update().
 double current_fps = NTSC_FPS;
+double current_render_scale = 1.0;
 
 double fps_from_name(const char *name)
 {
@@ -137,8 +140,8 @@ std::string v1_strings[NUM_BUTTONS];
 //
 // The value list -- the keys a button can send -- is the same in every language,
 // so it is not translated.
-// cats must hold 3 entries (input, timing, terminator); defs must hold
-// NUM_BUTTONS + 2 (the buttons, the fps option, terminator).
+// cats must hold 4 entries (input, timing, video, terminator); defs must hold
+// NUM_BUTTONS + 3 (the buttons, the fps option, the render scale, terminator).
 void build_options_v2(retro_core_option_v2_category *cats,
                       retro_core_option_v2_definition *defs,
                       const char *input_cat_name,
@@ -146,6 +149,9 @@ void build_options_v2(retro_core_option_v2_category *cats,
                       const char *timing_cat_name,
                       const char *timing_cat_info,
                       const char *fps_label,
+                      const char *video_cat_name,
+                      const char *video_cat_info,
+                      const char *scale_label,
                       const char *const *button_labels)
 {
 	cats[0].key  = CATEGORY_KEY;
@@ -154,7 +160,10 @@ void build_options_v2(retro_core_option_v2_category *cats,
 	cats[1].key  = TIMING_CATEGORY_KEY;
 	cats[1].desc = timing_cat_name;
 	cats[1].info = timing_cat_info;
-	std::memset(&cats[2], 0, sizeof(cats[2]));
+	cats[2].key  = VIDEO_CATEGORY_KEY;
+	cats[2].desc = video_cat_name;
+	cats[2].info = video_cat_info;
+	std::memset(&cats[3], 0, sizeof(cats[3]));
 
 	int d = 0;
 
@@ -192,6 +201,24 @@ void build_options_v2(retro_core_option_v2_category *cats,
 	defs[d].default_value = "60";
 	d++;
 
+	// The render scale. The one lever against a GPU-bound game on a weak board:
+	// the game lays out and renders at the reduced size and the frontend scales
+	// the finished frame up, so every full-screen pass shrinks with it. Takes
+	// effect when the game (re)creates its window -- in practice, on restart.
+	defs[d].key              = "love_render_scale";
+	defs[d].desc             = scale_label;
+	defs[d].desc_categorized = scale_label;
+	defs[d].info             = nullptr;
+	defs[d].info_categorized = nullptr;
+	defs[d].category_key     = VIDEO_CATEGORY_KEY;
+	defs[d].values[0] = { "100", "100%" };
+	defs[d].values[1] = { "75",  "75%"  };
+	defs[d].values[2] = { "66",  "66%"  };
+	defs[d].values[3] = { "50",  "50%"  };
+	defs[d].values[4] = { nullptr, nullptr };
+	defs[d].default_value = "100";
+	d++;
+
 	std::memset(&defs[d], 0, sizeof(defs[d]));
 }
 
@@ -213,10 +240,10 @@ bool set_options_v2(retro_environment_t environ_cb)
 	// All of these are handed to the frontend, which keeps the pointers, so they
 	// must outlive the call -- hence static. Sizes: 3 categories (input, timing,
 	// terminator) and NUM_BUTTONS + 2 definitions (buttons, fps, terminator).
-	static retro_core_option_v2_category   us_cats[3];
-	static retro_core_option_v2_definition us_defs[NUM_BUTTONS + 2];
-	static retro_core_option_v2_category   fr_cats[3];
-	static retro_core_option_v2_definition fr_defs[NUM_BUTTONS + 2];
+	static retro_core_option_v2_category   us_cats[4];
+	static retro_core_option_v2_definition us_defs[NUM_BUTTONS + 3];
+	static retro_core_option_v2_category   fr_cats[4];
+	static retro_core_option_v2_definition fr_defs[NUM_BUTTONS + 3];
 	static bool built = false;
 
 	if (!built)
@@ -229,6 +256,10 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 "Frame rate. Leave at 60 unless a game runs too fast, or "
 		                 "to match a 50 Hz display.",
 		                 "Frames per second",
+		                 "Video",
+		                 "Rendering. Lowering the render scale makes a heavy 3D "
+		                 "game much cheaper to draw, at the cost of sharpness.",
+		                 "Render scale",
 		                 EN_BUTTON_LABELS);
 
 		build_options_v2(fr_cats, fr_defs,
@@ -237,6 +268,9 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 LOVE_FR_CATEGORY_TIMING_NAME,
 		                 LOVE_FR_CATEGORY_TIMING_INFO,
 		                 LOVE_FR_FPS_LABEL,
+		                 LOVE_FR_CATEGORY_VIDEO_NAME,
+		                 LOVE_FR_CATEGORY_VIDEO_INFO,
+		                 LOVE_FR_SCALE_LABEL,
 		                 LOVE_FR_BUTTON_LABELS);
 		built = true;
 	}
@@ -260,7 +294,7 @@ bool set_options_v2(retro_environment_t environ_cb)
 // the fps option after the buttons.
 void set_options_v1(retro_environment_t environ_cb)
 {
-	static retro_variable vars[NUM_BUTTONS + 2];
+	static retro_variable vars[NUM_BUTTONS + 3];
 
 	for (int i = 0; i < NUM_BUTTONS; i++)
 	{
@@ -285,8 +319,11 @@ void set_options_v1(retro_environment_t environ_cb)
 	vars[NUM_BUTTONS].key   = "love_fps";
 	vars[NUM_BUTTONS].value = "Frames per second; 60|50|30";
 
-	vars[NUM_BUTTONS + 1].key   = nullptr;
-	vars[NUM_BUTTONS + 1].value = nullptr;
+	vars[NUM_BUTTONS + 1].key   = "love_render_scale";
+	vars[NUM_BUTTONS + 1].value = "Render scale; 100|75|66|50";
+
+	vars[NUM_BUTTONS + 2].key   = nullptr;
+	vars[NUM_BUTTONS + 2].value = nullptr;
 
 	environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
 }
@@ -329,6 +366,18 @@ void options_update(retro_environment_t environ_cb)
 		current_fps = fps_from_name(fps_var.value);
 	else
 		current_fps = 60.0;
+
+	// Render scale ("100".."50", a percentage).
+	retro_variable scale_var;
+	scale_var.key   = "love_render_scale";
+	scale_var.value = nullptr;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &scale_var) && scale_var.value != nullptr)
+	{
+		int pct = std::atoi(scale_var.value);
+		current_render_scale = (pct >= 25 && pct <= 100) ? pct / 100.0 : 1.0;
+	}
+	else
+		current_render_scale = 1.0;
 }
 
 int option_key_for_button(unsigned id)
@@ -345,6 +394,11 @@ int option_key_for_button(unsigned id)
 double option_fps()
 {
 	return current_fps;
+}
+
+double option_render_scale()
+{
+	return current_render_scale;
 }
 
 } // namespace libretro

@@ -18,7 +18,7 @@
 namespace love {
 namespace libretro {
 
-#define LOVE_LIBRETRO_VERSION "1.3"
+#define LOVE_LIBRETRO_VERSION "1.4"
 
 // libretro fixes the sample rate for the lifetime of the core, so LOVE's audio
 // backend has to resample to this rather than pick its own.
@@ -32,6 +32,13 @@ struct State
 	unsigned width  = 800;
 	unsigned height = 600;
 	double   fps    = 60.0988;
+
+	// Render scale (1.0 = native). Applied to the size a game requests via
+	// love.window.setMode: the game lays out and renders at the reduced size and
+	// the frontend upscales the finished frame. Every full-screen pass (canvases,
+	// post-processing) shrinks with it, which is the whole point -- it is the one
+	// lever against a GPU/fill-bound game on a weak board. Set from a core option.
+	double render_scale = 1.0;
 
 	// The GL context lives in the frontend. LOVE resolves its GL entry points
 	// through get_proc_address, and must render into the FBO that
@@ -68,6 +75,16 @@ struct State
 	// realtime (fast-forward, or a headless test).
 	double dt = 1.0 / 60.0988;
 
+	// --- Frame breakdown (diagnostic) ----------------------------------
+	// Filled by the injected love.run each frame: how long the game spent in
+	// update(), in draw(), and in present(). Reported alongside a slow frame so
+	// a spike says WHERE it went instead of only how long it was. Costs three
+	// clock reads a frame; the numbers are meaningless until the first frame has
+	// run, which is why they start at zero.
+	double frame_update_ms  = 0.0;
+	double frame_draw_ms    = 0.0;
+	double frame_present_ms = 0.0;
+
 	// --- Paths ---------------------------------------------------------
 	std::string system_dir;
 	std::string save_dir;
@@ -77,6 +94,16 @@ struct State
 };
 
 extern State state;
+
+// Read the game's intended window size out of its conf.lua and publish it in
+// state.width/height, WITHOUT booting LOVE or touching GL.
+//
+// Called from retro_load_game, before the frontend asks for the geometry. The
+// point is to get the first answer right: a size corrected later costs a
+// SET_SYSTEM_AV_INFO, and RetroArch answers that by recreating the GL context,
+// which reboots LOVE from scratch. Does nothing if the game has no conf.lua or
+// does not set a size -- the defaults then stand, exactly as before.
+void peek_game_size(const std::string &game_path);
 
 // Bring LOVE up: build the Lua state, preload the modules, start the boot
 // coroutine. Must be called with a live GL context. Returns false if LOVE

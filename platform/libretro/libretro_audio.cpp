@@ -50,7 +50,30 @@ void render_audio(retro_audio_sample_batch_t audio_batch_cb)
 
 	const double fps = state.fps > 0.0 ? state.fps : 60.0;
 
-	double wanted = SAMPLE_RATE / fps + sample_debt;
+	// ONE frame's worth of samples per frame -- always, whatever the frame just
+	// cost in wall-clock time. That is the libretro contract, and it is not an
+	// approximation to be improved on: the frontend derives its playback rate
+	// from this figure, so a core that varies it is telling the frontend the
+	// audio clock itself changed speed.
+	//
+	// This was tried the other way. Measuring the real time the frame took and
+	// rendering that much audio ("catch up on the sound owed during a stall")
+	// is intuitive and wrong: RetroArch's dynamic rate control continuously
+	// resamples to keep its buffer at a target level, and it reads a varying
+	// sample count as a drifting clock to correct for. It then chases a target
+	// that moves again the next frame. Measured with the headless tester on a
+	// real game, the per-frame count ranged 735..4410 with 100% of batches
+	// off-rate -- audible as a brief crackle and visible as a hitch, on x86 and
+	// ARM alike, which is exactly the "micro-stutter on every board" symptom
+	// that sent us looking for a driver or shader bug that was never there.
+	// Holding the count fixed puts it at exactly 735 every frame, 0% off-rate.
+	//
+	// A frame that genuinely overran is handled by the frontend, which is the
+	// only component that can: it has the buffer and the resampler. The core's
+	// job is to keep the meaning of "one frame" constant.
+	const double elapsed = 1.0 / fps;
+
+	double wanted = SAMPLE_RATE * elapsed + sample_debt;
 	int samples = (int) wanted;
 	sample_debt = wanted - (double) samples;
 
