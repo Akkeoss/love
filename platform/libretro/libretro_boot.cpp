@@ -69,9 +69,9 @@ int love_preload(lua_State *L, lua_CFunction f, const char *name)
 	return 0;
 }
 
-// love._libretro_frame_times(update, draw, present) -- appelee une fois par
-// frame par le love.run injecte. Les trois valeurs (en ms) atterrissent dans
-// state, ou report_hitch les relit pour dire d'ou vient une frame lente.
+// love._libretro_frame_times(update, draw, present) -- called once per frame by
+// the injected love.run. The three values (in ms) land in state, where
+// report_hitch reads them back to say WHERE a slow frame went.
 int l_frame_times(lua_State *ls)
 {
 	state.frame_update_ms  = luaL_optnumber(ls, 1, 0.0);
@@ -196,25 +196,36 @@ void run_quit_handler()
 	}
 	lua_pop(L, 1);           // love
 
-	// Filet de securite: dire "quit" a tous les canaux nommes.
+	// Safety net: say "quit" on the named channels.
 	//
-	// love.quit est le chemin normal, et il suffit quand le jeu y arrete ses
-	// workers. Mais il ne le fait que pour ceux qu'il connait, et il peut aussi
-	// ne rien faire du tout (mesure sur un vrai Recalbox: love.quit retourne 0
-	// sans qu'aucun thread ne s'arrete). Les threads restants sont alors tues par
-	// lua_close, en plein milieu de leur boucle -- et un thread a moitie mort
-	// quand le frontend dlclose() le core execute du code demappe.
+	// love.quit is the normal path, and it is enough when the game stops its
+	// workers there. But it only stops the ones it knows about, and it may do
+	// nothing at all (measured on a real Recalbox: love.quit returned 0 with not
+	// one thread stopping). The remaining threads are then killed by lua_close in
+	// the middle of their loop -- and a half-dead thread runs unmapped code once
+	// the frontend dlclose()s the core.
 	//
-	// La convention que suivent les workers love.thread -- y compris ceux des
-	// jeux mesures ici -- est de lire une commande sur un canal nomme et de
-	// s'arreter sur "quit". On la leur envoie donc explicitement, sur CHAQUE
-	// canal, avant lua_close. Un worker qui n'attend pas cette convention ignore
-	// simplement une valeur de plus dans sa file; un worker qui la suit sort de
-	// sa boucle et se termine proprement.
+	// The convention love.thread workers follow -- including the ones measured
+	// here -- is to read a command off a named channel and stop on "quit". So we
+	// send them exactly that before lua_close. A worker that does not expect this
+	// convention simply ignores one more value in its queue; one that follows it
+	// leaves its loop and terminates cleanly.
 	//
-	// Puis on laisse tourner quelques frames de rien du tout: un thread a besoin
-	// d'etre ordonnance pour voir le message. Sans cette pause, on pousserait le
-	// quit et on fermerait Lua dans la foulee, ce qui ne changerait rien.
+	// ACCEPTED DEBT: the two names below are one game's (Gen1Recomp), not a
+	// general list. This is the only place in the port that knows a game by name,
+	// and another game with different channel names would not be covered -- it
+	// would fall back on love.quit, which is enough when the game does its job.
+	//
+	// There is no simple way to do better: LOVE exposes no enumeration of named
+	// channels (love.thread.getChannel creates them on demand, and there is no
+	// getChannels), so "push quit on EVERY channel" is not writable in Lua from
+	// here at all. A real fix would go through C++, on the ThreadModule side, or
+	// through a generalised thread:wait() -- real work, for a benefit limited to
+	// games that spawn workers AND forget to stop them.
+	//
+	// Then let a few empty frames run: a thread has to be scheduled to see the
+	// message. Without that pause we would push the quit and close Lua right
+	// after, which would change nothing.
 	static const char *STOP_WORKERS =
 		"if not (love and love.thread) then return end\n"
 		"local ok, err = pcall(function()\n"
@@ -566,10 +577,8 @@ bool boot(const std::string &game_path)
 		lua_pop(L, 1);
 	}
 
-	// Put the love table back, since the code below expects it there.
-	lua_getglobal(L, "love");
-
-	lua_pop(L, 1);   // pop the love table
+	// Nothing to restore: the chunk above reached love through the global, and
+	// what follows does the same. The stack is already balanced here.
 
 	// require "love.boot"
 	lua_getglobal(L, "require");

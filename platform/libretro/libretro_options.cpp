@@ -238,8 +238,12 @@ bool set_options_v2(retro_environment_t environ_cb)
 		return false;
 
 	// All of these are handed to the frontend, which keeps the pointers, so they
-	// must outlive the call -- hence static. Sizes: 3 categories (input, timing,
-	// terminator) and NUM_BUTTONS + 2 definitions (buttons, fps, terminator).
+	// must outlive the call -- hence static. Sizes must match what
+	// build_options_v2 writes, and it writes past neither: 4 categories (input,
+	// timing, video, terminator) and NUM_BUTTONS + 3 definitions (the buttons,
+	// fps, render scale, terminator). Adding an option means growing both here
+	// and in the contract stated above build_options_v2 -- an overrun here would
+	// be silent.
 	static retro_core_option_v2_category   us_cats[4];
 	static retro_core_option_v2_definition us_defs[NUM_BUTTONS + 3];
 	static retro_core_option_v2_category   fr_cats[4];

@@ -103,6 +103,12 @@ extern State state;
 // SET_SYSTEM_AV_INFO, and RetroArch answers that by recreating the GL context,
 // which reboots LOVE from scratch. Does nothing if the game has no conf.lua or
 // does not set a size -- the defaults then stand, exactly as before.
+//
+// CURRENTLY NOT CALLED. It works, and it does remove the second boot, but it
+// breaks the picture on a 15 kHz CRT: see the call site in retro_load_game for
+// why the context rebuild that the second boot brings is what keeps KMS and the
+// modeline in agreement. Kept here rather than deleted so the next attempt
+// starts from working code and the note that goes with it.
 void peek_game_size(const std::string &game_path);
 
 // Bring LOVE up: build the Lua state, preload the modules, start the boot

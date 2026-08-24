@@ -126,6 +126,14 @@ void report_hitch(double ms)
 	static int    suppressed = 0;
 	static double worst_ms   = 0.0;
 
+	// retro_init sets log_cb (to the frontend's logger or the stderr fallback), so
+	// in a normal lifecycle it is never null here. Checked anyway because this is
+	// the one place in the file that would dereference it blind, and a frontend
+	// that ever calls retro_run out of order would crash on a diagnostic -- the
+	// worst possible thing to crash on.
+	if (!log_cb)
+		return;
+
 	const double budget_ms = 1000.0 / love::libretro::state.fps;
 	if (ms <= budget_ms * HITCH_FACTOR)
 		return;
@@ -290,15 +298,9 @@ RETRO_API void retro_init()
 	//
 	// Mesa only keeps its shader cache when it can find a writable cache
 	// directory; a frontend running without a usable HOME silently loses it, and
-	// then EVERY session recompiles EVERY shader from scratch. A game that
-	// compiles a shader mid-play (a battle effect, say) then stalls a full frame
-	// or more on a board whose GLSL compiler is slow -- a hitch that a desktop,
-	// with its fast compiler and enabled cache, never shows. Pointing the cache
-	// at the save directory makes those compiles a one-time cost per board.
-	//
-	// setenv with overwrite=0: an environment that already configured the cache
-	// wins. This runs before the frontend creates the GL context, which is when
-	// the driver makes its cache decision.
+	// then EVERY session recompiles EVERY shader from scratch -- a stall the
+	// first time each shader is used. Pointing the cache at the save directory
+	// makes those compiles a one-time cost per board.
 	if (!love::libretro::state.save_dir.empty())
 	{
 		std::string cache = love::libretro::state.save_dir + "/shader_cache";
@@ -533,7 +535,21 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 	// The size is in conf.lua, plain Lua that runs long before any GL work
 	// (love.conf precedes love.window.setMode in boot.lua). A wrong guess costs
 	// exactly what the old behaviour cost; a right one saves an entire boot.
-	love::libretro::peek_game_size(game_path);
+	// Deliberately NOT called -- see the note on peek_game_size itself.
+	//
+	// Reading conf.lua up front removes the second boot, and it works. But on a
+	// 15 kHz CRT it breaks the picture: announcing the game's size before the
+	// frontend has a video mode means the geometry change that follows is a
+	// SET_GEOMETRY rather than a SET_SYSTEM_AV_INFO, and only the latter makes
+	// RetroArch rebuild the GL context -- which is what leaves KMS and the
+	// modeline agreeing with each other. Without it the launcher renders shifted
+	// down with a black band at the top, verified on real hardware both ways.
+	//
+	// The modeline itself is identical in both cases (1024x488i, Y scale 0.635),
+	// which is why reading the log alone points at the wrong culprit. What
+	// differs is the context rebuild. So the double boot stays: ~0.4s of
+	// duplicated work at launch against a picture that is simply wrong.
+	// love::libretro::peek_game_size(game_path);
 
 	// LOVE itself is booted in context_reset, not here: there is no GL context
 	// yet, and love.graphics cannot come up without one.
@@ -632,20 +648,31 @@ RETRO_API void retro_run()
 	// context on SET_SYSTEM_AV_INFO, which is exactly why this never showed up in
 	// testing and only appeared in a log from real hardware.
 	//
-	// So: pay for it only when it actually buys something. The expensive call is
-	// needed when the game grows past the framebuffer we have -- that is the case
-	// where a cheap re-crop would clip the picture. When the new size FITS what is
-	// already allocated, SET_GEOMETRY re-crops within it for free, no context
-	// churn, no reboot. The CRT fix is untouched: the framebuffer is still sized
-	// to the game rather than to some guessed worst case, because that is decided
-	// by the max we report, and this only ever raises it to a real size a game
-	// asked for.
+	// It was once paid only when the game OUTGREW the framebuffer, on the theory
+	// that a size which fits can be re-cropped for free with SET_GEOMETRY. That
+	// theory is wrong on a CRT, and Mr. Rescue is the counter-example: it renders
+	// 768x600 inside the 800x600 default, fits comfortably, took the cheap path --
+	// and came out with a black band at the top on 15 kHz, because crtswitchres
+	// builds its modeline from the ALLOCATED buffer, not from base. 32 unused
+	// pixels of width were enough. HDMI hid it by cropping to base and centring.
+	//
+	// So the condition is exact match, not fit: whenever the game's size differs
+	// from what is allocated, reallocate. That restores the rule the July CRT fix
+	// established -- the framebuffer is always exactly the game's size, never a
+	// buffer with margin -- which is the property the whole fix rests on.
+	//
+	// SET_GEOMETRY remains for the case where nothing needs reallocating, which
+	// after this is only a change of aspect ratio at an unchanged size.
 	{
 		// Seeded, not zeroed. These start at whatever retro_get_system_av_info
-		// reported -- which, thanks to peek_game_size, is normally already the
-		// game's real resolution. Starting them at 0 made the first frame look
-		// like a change from nothing and fired the expensive path every launch,
-		// undoing the whole point of reading conf.lua early.
+		// reported. Starting them at 0 made the first frame look like a change
+		// from nothing, firing the expensive path even for a game that runs at
+		// exactly the size already announced.
+		//
+		// With peek_game_size disabled (see retro_load_game) that seed is the
+		// 800x600 default, so a game declaring another size does pay one
+		// SET_SYSTEM_AV_INFO at launch -- deliberately, because the context
+		// rebuild it triggers is what keeps the picture right on a 15 kHz CRT.
 		static unsigned last_w = reported_w;
 		static unsigned last_h = reported_h;
 		static unsigned fbo_w  = reported_w;   // what the frontend has allocated
@@ -656,17 +683,39 @@ RETRO_API void retro_run()
 
 		if ((w != last_w || h != last_h) && w > 0 && h > 0)
 		{
-			const bool needs_bigger_fbo = (w > fbo_w || h > fbo_h);
+			// Resize the framebuffer whenever it does not already match the game
+			// exactly -- not merely when the game outgrows it.
+			//
+			// The cheap path (SET_GEOMETRY, re-crop inside the buffer we have)
+			// was written to avoid the context rebuild for a game that FITS. It
+			// does avoid it, and on HDMI the result is indistinguishable: the
+			// frontend crops to base and centres. On a 15 kHz CRT it is not.
+			// crtswitchres derives its modeline from the ALLOCATED framebuffer,
+			// so a game rendering 768x600 inside an 800x600 buffer gets a
+			// modeline for 800x600 and a picture pushed off-centre -- Mr. Rescue,
+			// 32px of unused width, a black band at the top on real hardware.
+			//
+			// This is the same defect the July fix addressed for an oversized
+			// max (1920x1080), reappearing at a size small enough that "it fits"
+			// looked like a reason not to pay. The rule that actually holds is
+			// the one that fix established: the framebuffer is sized to the game,
+			// always. So the exact-match test replaces the outgrows test.
+			//
+			// The cost is one context rebuild per resolution change rather than
+			// zero. A game changes resolution rarely (usually once, at boot), and
+			// a rebuild is ~0.4s of reboot against a picture that is simply wrong
+			// on an entire class of display.
+			const bool needs_fbo_resize = (w != fbo_w || h != fbo_h);
 
 			struct retro_game_geometry geom;
 			std::memset(&geom, 0, sizeof(geom));
 			geom.base_width   = w;
 			geom.base_height  = h;
-			geom.max_width    = needs_bigger_fbo ? w : fbo_w;
-			geom.max_height   = needs_bigger_fbo ? h : fbo_h;
+			geom.max_width    = needs_fbo_resize ? w : fbo_w;
+			geom.max_height   = needs_fbo_resize ? h : fbo_h;
 			geom.aspect_ratio = (float) w / (float) h;
 
-			if (needs_bigger_fbo)
+			if (needs_fbo_resize)
 			{
 				struct retro_system_av_info av;
 				std::memset(&av, 0, sizeof(av));
