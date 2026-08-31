@@ -19,6 +19,9 @@
 
 #include "libretro_state.h"
 
+#include "graphics/opengl/Graphics.h"
+#include "libretro_options.h"
+
 #include "common/config.h"
 #include "common/version.h"
 #include "common/runtime.h"
@@ -77,6 +80,9 @@ int l_frame_times(lua_State *ls)
 	state.frame_update_ms  = luaL_optnumber(ls, 1, 0.0);
 	state.frame_draw_ms    = luaL_optnumber(ls, 2, 0.0);
 	state.frame_present_ms = luaL_optnumber(ls, 3, 0.0);
+	state.frame_draw_calls      = (int) luaL_optnumber(ls, 4, 0);
+	state.frame_canvas_switches = (int) luaL_optnumber(ls, 5, 0);
+	state.frame_shader_switches = (int) luaL_optnumber(ls, 6, 0);
 	return 0;
 }
 
@@ -424,16 +430,28 @@ bool boot(const std::string &game_path)
 	lua_pushstring(L, "love.jitsetup");
 	lua_call(L, 1, 0);
 
-	// Re-enable the JIT on ARM.
+	// LuaJIT, only if the player asked for it.
 	//
-	// love's jitsetup.lua ends with jit.off() on arm/arm64: compiled machine code
-	// has to land within a short branch reach of the LuaJIT library, SDL could
-	// exhaust that window, and upstream judged the result too unreliable to ship.
-	// That is the right default for the SDL runtime -- which is why jitsetup.lua
-	// is left untouched -- but it means every .love runs interpreted on a board,
-	// several times slower than it needs to be. jitsetup's pool-reservation
-	// workaround still runs before its jit.off(), so the mitigation is in place;
-	// only the final switch-off is undone, and only here.
+	// love's jitsetup.lua ends with jit.off() on arm/arm64, and this used to
+	// undo it unconditionally, reasoning that interpreted Lua on a board is
+	// simply slower than compiled. That reasoning misreads why upstream turns it
+	// off. Their comment is explicit: on ARM, LuaJIT can only allocate machine
+	// code within a short branch reach, SDL can take that space, and compilation
+	// then "both fail and take a long time". A compiler that retries and fails
+	// is not slower on average -- it stalls, which is exactly the shape of the
+	// problem players report on heavy games: frames costing hundreds of
+	// milliseconds rather than a uniformly lower rate.
+	//
+	// The evidence that settled it: the official native ARM64 build of a heavy
+	// LOVE game ships this same liblove 11.5 with jitsetup's jit.off() intact,
+	// nothing re-enables it, and it runs smoothly on the same class of board
+	// where this core stuttered with the JIT forced on.
+	//
+	// So the default is now what upstream and the native builds use -- off --
+	// and turning it on is the player's call, because which way wins depends on
+	// the board and on what the game asks of the compiler. jitsetup's pool
+	// reservation runs either way.
+	if (option_jit())
 	{
 		static const char *JIT_ON =
 			"if type(jit) ~= 'table' or not jit.on then return 'nojit' end\n"
@@ -441,11 +459,82 @@ bool boot(const std::string &game_path)
 			"return jit.status and jit.status() and 'on' or 'off'\n";
 		if (luaL_loadstring(L, JIT_ON) == 0 && lua_pcall(L, 0, 1, 0) == 0)
 			log(RETRO_LOG_INFO, "[LOVE] LuaJIT: %s\n", lua_tostring(L, -1));
+
 		else
 			log(RETRO_LOG_WARN, "[LOVE] could not re-enable LuaJIT: %s\n",
 				lua_tostring(L, -1));
 		lua_pop(L, 1);
 	}
+	else
+	{
+		log(RETRO_LOG_INFO, "[LOVE] LuaJIT: off (jitsetup default)\n");
+	}
+
+	// Give up on the JIT if it cannot place its machine code.
+	//
+	// On ARM64 LuaJIT must allocate mcode within +-128MB of its own VM
+	// (LJ_TARGET_JUMPRANGE in lj_arch.h); mcode_alloc probes for such an
+	// address and gives up with "failed to allocate mcode memory" when the
+	// range is taken. A core is dlopen'd after the frontend, Mesa, SDL and
+	// the audio stack are already placed, so that window is far more likely
+	// to be full than it is for an executable loaded into an empty address
+	// space -- which is why the native ARM build of the same game does not
+	// hit this.
+	//
+	// The failure is not a quiet loss of compilation. The compiler retries:
+	// it records a trace, fails to place it, aborts, and the next hot loop
+	// starts the whole thing again. Measured on a Pi 5 that shows up as
+	// update() taking 462ms, 1247ms, 3990ms with draw() at 8ms -- the GPU
+	// idle while LuaJIT spins. jitsetup.lua's own comment says exactly this
+	// ("both fail and take a long time"); it is simply far worse in a core.
+	//
+	// So watch the trace events, and if mcode allocation keeps failing,
+	// switch the JIT off once and stop. Interpreted Lua is slower than
+	// compiled Lua, and much faster than a compiler that never succeeds.
+	// Errors are matched by MESSAGE, not by index: jit.vmdef.traceerr is
+	// generated per LuaJIT version and the numbering is not a contract.
+	//
+	// The error code arrives in the FIFTH callback argument, not the sixth.
+	// jit.attach's trace callback is (what, tr, func, pc, otr, oex), and for
+	// an 'abort' LuaJIT reuses those last two slots: otr carries the error
+	// code and oex its format argument -- which is why jit/dump.lua writes
+	// fmterr(otr, oex) and indexes traceerr[otr]. Reading oex instead looks
+	// right, compiles, and silently never matches: on a Pi 5 it yielded 51,
+	// a bytecode number, while traceerr ends at 31 -- so the guard never
+	// fired and the protection was dead code. Verified directly: a pcall in
+	// a hot loop reports otr=7 ('NYI: bytecode %s'), oex=51.
+	static const char *JIT_GUARD =
+		"local ok, vmdef = pcall(require, 'jit.vmdef')\n"
+		"if not ok or type(vmdef.traceerr) ~= 'table' then return 'no vmdef' end\n"
+		"local watch = {}\n"
+		"for i, msg in ipairs(vmdef.traceerr) do\n"
+		"  if msg == 'failed to allocate mcode memory'\n"
+		"     or msg == 'hit mcode limit (retrying)' then watch[i] = true end\n"
+		"end\n"
+		"if not next(watch) then return 'no mcode errors in this build' end\n"
+		"local hits, tripped = 0, false\n"
+		"jit.attach(function(what, tr, func, pc, otr, oex)\n"
+		"  if tripped or what ~= 'abort' then return end\n"
+		"  if watch[otr] then\n"
+		"    hits = hits + 1\n"
+		"    if hits >= 32 then\n"
+		"      tripped = true\n"
+		"      pcall(jit.off)\n"
+		"      pcall(jit.flush)\n"
+		"      if love and love._libretro_jit_gave_up then\n"
+		"        love._libretro_jit_gave_up(hits)\n"
+		"      end\n"
+		"    end\n"
+		"  end\n"
+		"end, 'trace')\n"
+		"return 'armed'\n";
+	if (luaL_loadstring(L, JIT_GUARD) == 0 && lua_pcall(L, 0, 1, 0) == 0)
+		log(RETRO_LOG_INFO, "[LOVE] LuaJIT mcode guard: %s\n",
+			lua_tostring(L, -1));
+	else
+		log(RETRO_LOG_WARN, "[LOVE] LuaJIT mcode guard failed: %s\n",
+			lua_tostring(L, -1));
+	lua_pop(L, 1);
 
 	love_preload(L, luaopen_love, "love");
 
@@ -501,6 +590,21 @@ bool boot(const std::string &game_path)
 	lua_pushcfunction(L, l_frame_times);
 	lua_setfield(L, -2, "_libretro_frame_times");
 
+	// love._libretro_jit_gave_up(n): the mcode guard installed above calls this
+	// when it has switched the JIT off. Reported once, loudly, because it turns
+	// "the game stutters" into a named cause -- and because a player seeing it
+	// should know the core is now running interpreted on purpose.
+	lua_pushcfunction(L, [](lua_State *ls) -> int {
+		const int hits = (int) luaL_optnumber(ls, 1, 0);
+		log(RETRO_LOG_WARN,
+		    "[LOVE] LuaJIT could not place its machine code (%d failures) -- "
+		    "switching it off. This is the ARM 128MB jump-range limit; the core "
+		    "now runs interpreted, which is slower per operation but does not "
+		    "stall.\n", hits);
+		return 0;
+	});
+	lua_setfield(L, -2, "_libretro_jit_gave_up");
+
 	// The love.run the frontend needs, published as love._libretro_run.
 	//
 	// boot.lua installs this over whatever love.run the game defined, right
@@ -555,11 +659,19 @@ bool boot(const std::string &game_path)
 		"      love.graphics.clear(love.graphics.getBackgroundColor())\n"
 		"      if love.draw then love.draw() end\n"
 		"      local _t2 = _clk and _clk() or 0\n"
+		// present() resets the per-frame counters (see Graphics::present), so
+		// read them while they still describe the frame just drawn.
+		"      local st = love.graphics.getStats and love.graphics.getStats()\n"
 		"      love.graphics.present()\n"
 		"      local _t3 = _clk and _clk() or 0\n"
 		"      if love._libretro_frame_times then\n"
+
 		"        love._libretro_frame_times((_t1-_t0)*1000, (_t2-_t1)*1000,\n"
-		"                                   (_t3-_t2)*1000)\n"
+		"                                   (_t3-_t2)*1000,\n"
+		"                                   st and st.drawcalls or 0,\n"
+		"                                   st and st.canvasswitches or 0,\n"
+		"                                   st and st.shaderswitches or 0,\n"
+		"                                   st and st.texturememory or 0)\n"
 		"      end\n"
 		"    end\n"
 		"    -- No love.timer.sleep here: the frontend decides when the next frame\n"
@@ -606,6 +718,17 @@ bool run_frame()
 	// PhysFS comes up during the boot coroutine, so the earliest we can add to the
 	// search path is here, on the frames after boot() -- not in boot() itself.
 	mount_game_directory();
+
+	// The frontend had the GL context since our last frame and drew with it --
+	// its own program, buffers, textures and enables. LOVE caches what it last
+	// bound and skips a bind it thinks is redundant, so every one of those
+	// caches is now describing state that is no longer there. Tell it to stop
+	// trusting them before the game draws anything.
+	// The module registers under the base graphics::Graphics type, so ask for
+	// that and step down to the GL implementation we know is behind it.
+	if (auto *gfx = love::Module::getInstance<love::graphics::Graphics>(
+			love::Module::M_GRAPHICS))
+		((love::graphics::opengl::Graphics *) gfx)->libretroBeginFrame();
 
 	int nres = 0;
 	int status = luax_resume(boot_co, 0, &nres);

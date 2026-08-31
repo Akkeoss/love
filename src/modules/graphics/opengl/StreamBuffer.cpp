@@ -89,6 +89,7 @@ public:
 	StreamBufferSubDataOrphan(BufferType mode, size_t size)
 		: love::graphics::StreamBuffer(mode, size)
 		, vbo(0)
+		, ringIndex(0)
 		, glMode(OpenGL::getGLBufferType(mode))
 		, data(nullptr)
 		, orphan(false)
@@ -126,7 +127,21 @@ public:
 
 	size_t unmap(size_t usedsize) override
 	{
+		// One frame is uploaded in several batches (one per state change), but
+		// nextFrame() only orphans once per frame -- so batches 2..N would write
+		// into storage the GPU is still reading for the batches before them, and
+		// the driver has to block the CPU until those reads retire. A tiled GPU
+		// makes that stall dominate: on a Pi 5 (V3D) 18 uploads totalling 2KB
+		// cost 15.6ms, ~870us to move ~114 bytes.
+		//
+		// Hand each batch its own buffer instead: the GPU reads ring slot n while
+		// the CPU writes slot n+1, so the conflict cannot arise. Same measurement
+		// with the ring: 0.2ms.
+		ringIndex = (ringIndex + 1) % RING_SIZE;
+		vbo = vbos[ringIndex];
+
 		gl.bindBuffer(mode, vbo);
+		glBufferData(glMode, bufferSize, nullptr, GL_STREAM_DRAW);
 		glBufferSubData(glMode, frameGPUReadOffset, usedsize, data);
 		return frameGPUReadOffset;
 	}
@@ -150,9 +165,15 @@ public:
 		if (vbo != 0)
 			return true;
 
-		glGenBuffers(1, &vbo);
-		gl.bindBuffer(mode, vbo);
-		glBufferData(glMode, bufferSize, nullptr, GL_STREAM_DRAW);
+		for (int i = 0; i < RING_SIZE; i++)
+		{
+			glGenBuffers(1, &vbos[i]);
+			gl.bindBuffer(mode, vbos[i]);
+			glBufferData(glMode, bufferSize, nullptr, GL_STREAM_DRAW);
+		}
+
+		ringIndex = 0;
+		vbo = vbos[0];
 
 		frameGPUReadOffset = 0;
 		orphan = false;
@@ -165,13 +186,29 @@ public:
 		if (vbo == 0)
 			return;
 
-		gl.deleteBuffer(vbo);
+		for (int i = 0; i < RING_SIZE; i++)
+		{
+			if (vbos[i] != 0)
+			{
+				gl.deleteBuffer(vbos[i]);
+				vbos[i] = 0;
+			}
+		}
+
 		vbo = 0;
+		ringIndex = 0;
 	}
 
 protected:
 
+	// Deep enough to cover the batches one frame issues (18 measured in the
+	// heaviest frame seen) with room to spare, so a slot is never reused while
+	// the GPU could still be reading it.
+	static const int RING_SIZE = 24;
+
 	GLuint vbo;
+	GLuint vbos[RING_SIZE] = {};
+	int ringIndex;
 	GLenum glMode;
 
 	uint8 *data;
@@ -529,6 +566,31 @@ love::graphics::StreamBuffer *CreateStreamBuffer(BufferType mode, size_t size)
 #endif
 		}
 
+		return new StreamBufferSubDataOrphan(mode, size);
+	}
+	else if (GLAD_ES_VERSION_2_0)
+	{
+		// GLES gets the orphaning VBO path too, not client memory.
+		//
+		// The core-profile test above is really asking "can this context do
+		// persistent mapping or pinned memory", both of which need desktop GL.
+		// GLES answers no to that and used to fall all the way through to
+		// StreamBufferClientMemory -- vertex arrays in CPU memory, with
+		// getHandle() returning 0 so every draw call passes a client pointer to
+		// glVertexAttribPointer.
+		//
+		// That path exists for GL 2.1 contexts where it is genuinely the only
+		// option. On GLES it is the slowest one available and not the only one:
+		// glBufferData/glBufferSubData are core since GLES 2.0, which is all
+		// StreamBufferSubDataOrphan uses. Client arrays are not even part of
+		// GLES 2+ proper, so drivers that accept them do so by copying the
+		// vertices themselves on every draw -- work that a buffer object avoids
+		// entirely.
+		//
+		// Measured on a Pi 5 (V3D, Mesa 25.1): draw() spending 821ms of CPU on a
+		// frame the GPU finished in 4.4ms, and 124ms of frame time on scenes as
+		// small as 17 draw calls. Desktop GL never took this path, which is why
+		// the same content is fine everywhere else.
 		return new StreamBufferSubDataOrphan(mode, size);
 	}
 	else

@@ -248,6 +248,18 @@ public:
 	 **/
 	void deleteBuffer(GLuint buffer);
 
+#ifdef LOVE_ENABLE_LIBRETRO
+	/**
+	 * Forget what GL state LOVE thinks is bound, without touching the objects
+	 * themselves. A libretro frontend draws its own passes between two
+	 * retro_run() calls and leaves its own program, buffers, textures and
+	 * enables behind; every one of LOVE's "already bound, skip it" caches is
+	 * then wrong. Call this at the top of a frame so the next bind of each
+	 * kind really reaches the driver.
+	 */
+	void invalidateStateCache();
+#endif
+
 	/**
 	 * Set all vertex attribute state.
 	 **/

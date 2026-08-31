@@ -224,10 +224,12 @@ attribute vec4 VertexColor;
 attribute vec4 ConstantColor;
 
 varying vec4 VaryingTexCoord;
-varying vec4 VaryingColor;
+varying vec4 VaryingColor;]],
 
-vec4 position(mat4 clipSpaceFromLocal, vec4 localPosition);
-
+	-- See GLSL.PIXEL.MAIN_AFTER: main() follows the shader's own code so
+	-- position() needs no forward declaration whose precision could disagree
+	-- with the definition's.
+	MAIN_AFTER = [[
 void main() {
 	VaryingTexCoord = VertexTexCoord;
 	VaryingColor = gammaCorrectColor(VertexColor) * ConstantColor;
@@ -290,20 +292,39 @@ vec4 VideoTexel(vec2 texcoords) {
 	MAIN = [[
 uniform sampler2D MainTex;
 varying LOVE_HIGHP_OR_MEDIUMP vec4 VaryingTexCoord;
-varying mediump vec4 VaryingColor;
+varying mediump vec4 VaryingColor;]],
 
-vec4 effect(vec4 vcolor, Image tex, vec2 texcoord, vec2 pixcoord);
-
+	-- main() is emitted AFTER the shader's own code, not before it, so that
+	-- effect() needs no forward declaration.
+	--
+	-- A prototype has to state a precision for its float parameters and return,
+	-- and GLSL ES resolves an unqualified float to whatever `precision` is in
+	-- force where the declaration sits -- mediump, from the header above. A
+	-- shader doing world-space or depth maths needs `precision highp float` (at
+	-- mediump, fp16, a coordinate in the thousands quantises visibly), states it
+	-- before its own effect(), and GLSL ES then refuses the pair:
+	--
+	--   error: function `effect' return type precision doesn't match prototype
+	--
+	-- No fixed qualifier fixes that: pin the prototype mediump and the highp
+	-- shader is rejected, pin it highp and every ordinary shader is. The
+	-- prototype simply cannot know which precision the shader will choose --
+	-- but placed after the definition, main() does not need to guess, because
+	-- the definition is already in scope.
+	--
+	-- Desktop GL accepts and ignores precision qualifiers, so this only ever
+	-- bit GLES: shaders that work everywhere else failing on a Pi or a phone,
+	-- with the author unable to fix it because the prototype was ours.
+	MAIN_AFTER = [[
 void main() {
 	love_PixelColor = effect(VaryingColor, MainTex, VaryingTexCoord.st, love_PixelCoord);
 }]],
 
 	MAIN_CUSTOM = [[
 varying LOVE_HIGHP_OR_MEDIUMP vec4 VaryingTexCoord;
-varying mediump vec4 VaryingColor;
+varying mediump vec4 VaryingColor;]],
 
-void effect();
-
+	MAIN_CUSTOM_AFTER = [[
 void main() {
 	effect();
 }]],
@@ -330,6 +351,11 @@ local function createShaderStageCode(stage, code, lang, gles, glsl1on3, gammacor
 		custom and GLSL[stage].MAIN_CUSTOM or GLSL[stage].MAIN,
 		((lang == "glsl1" or glsl1on3) and not gles) and "#line 0" or "#line 1",
 		code,
+		-- After the shader's own code: main() calls effect()/position(), which
+		-- are now already defined, so no prototype is needed and no precision
+		-- has to be guessed on their behalf. See MAIN_AFTER.
+		custom and (GLSL[stage].MAIN_CUSTOM_AFTER or GLSL[stage].MAIN_AFTER)
+		        or GLSL[stage].MAIN_AFTER,
 	}
 	return table_concat(lines, "\n")
 end

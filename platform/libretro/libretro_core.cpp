@@ -146,14 +146,17 @@ void report_hitch(double ms)
 		logged++;
 		log_cb(RETRO_LOG_WARN,
 		       "[LOVE] slow frame: %.1fms (budget %.1fms) -- update %.1f draw %.1f "
-		       "present %.1f, reste %.1f\n",
+		       "present %.1f, reste %.1f [%d draws, %d canvas, %d shader]\n",
 		       ms, budget_ms,
 		       love::libretro::state.frame_update_ms,
 		       love::libretro::state.frame_draw_ms,
 		       love::libretro::state.frame_present_ms,
 		       ms - love::libretro::state.frame_update_ms
 		          - love::libretro::state.frame_draw_ms
-		          - love::libretro::state.frame_present_ms);
+		          - love::libretro::state.frame_present_ms,
+		       love::libretro::state.frame_draw_calls,
+		       love::libretro::state.frame_canvas_switches,
+		       love::libretro::state.frame_shader_switches);
 		if (logged == MAX_LOGGED)
 			log_cb(RETRO_LOG_WARN,
 			       "[LOVE] further slow frames will only be counted, not listed\n");
@@ -547,9 +550,21 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 	//
 	// The modeline itself is identical in both cases (1024x488i, Y scale 0.635),
 	// which is why reading the log alone points at the wrong culprit. What
-	// differs is the context rebuild. So the double boot stays: ~0.4s of
-	// duplicated work at launch against a picture that is simply wrong.
-	// love::libretro::peek_game_size(game_path);
+	// differs is the context rebuild. So the double boot stays by default: ~0.4s
+	// of duplicated work at launch against a picture that is simply wrong.
+	//
+	// Behind an option rather than deleted, because the cost is not only that
+	// 0.4s: the second boot rebuilds every shader and reloads every texture the
+	// game had already built, which on a mod with a large asset set is the
+	// heaviest thing that happens at launch. A player on HDMI pays that for a
+	// CRT defect they will never see, and only they can tell whether their
+	// display is affected -- so it is theirs to switch on and look.
+	if (love::libretro::option_single_boot())
+	{
+		love::libretro::peek_game_size(game_path);
+		log_cb(RETRO_LOG_INFO, "[LOVE] single boot: game size read up front (%ux%u)\n",
+		       love::libretro::state.width, love::libretro::state.height);
+	}
 
 	// LOVE itself is booted in context_reset, not here: there is no GL context
 	// yet, and love.graphics cannot come up without one.

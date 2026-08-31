@@ -71,6 +71,12 @@ public:
 
 	void setActive(bool active) override;
 
+#ifdef LOVE_ENABLE_LIBRETRO
+	// Called once per retro_run(), before the game draws: the frontend has had
+	// the context in between and LOVE's state caches cannot be trusted.
+	void libretroBeginFrame();
+#endif
+
 	void draw(const DrawCommand &cmd) override;
 	void draw(const DrawIndexedCommand &cmd) override;
 	void drawQuads(int start, int count, const vertex::Attributes &attributes, const vertex::BufferBindings &buffers, Texture *texture) override;

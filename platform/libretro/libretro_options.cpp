@@ -103,7 +103,18 @@ constexpr double NTSC_FPS = 60.0988;
 // written for, and the other values are there for the rare game built for 30, or
 // to match a 50 Hz display. Filled by options_update().
 double current_fps = NTSC_FPS;
-double current_render_scale = 1.0;
+double current_render_scale = 0.0;   // 0.0 = auto
+
+// Whether the player asked for LuaJIT. Read once at boot (libretro_boot.cpp);
+// changing it mid-game would do nothing, since the compiler state is set up
+// before any game code runs.
+bool current_jit = true;
+
+// Whether to read the game's size from conf.lua before the frontend asks, which
+// removes the second boot. Off by default: it is known to break the picture on
+// a 15 kHz CRT (see the call site in retro_load_game), and that is not a
+// trade-off to make for a player without asking.
+bool current_single_boot = false;
 
 double fps_from_name(const char *name)
 {
@@ -149,6 +160,8 @@ void build_options_v2(retro_core_option_v2_category *cats,
                       const char *timing_cat_name,
                       const char *timing_cat_info,
                       const char *fps_label,
+                      const char *jit_label,
+                      const char *singleboot_label,
                       const char *video_cat_name,
                       const char *video_cat_info,
                       const char *scale_label,
@@ -187,6 +200,57 @@ void build_options_v2(retro_core_option_v2_category *cats,
 		defs[d].default_value = BUTTONS[b].default_value;
 	}
 
+	// The LuaJIT option.
+	//
+	// love's jitsetup.lua ends with jit.off() on arm/arm64, and upstream's
+	// reason is not caution: LuaJIT 2.1 can only allocate machine code within a
+	// short branch reach on ARM, SDL can exhaust that window, and compilation
+	// then "both fail and take a long time". The core has been re-enabling it,
+	// on the theory that interpreted Lua on a board is simply slower -- but a
+	// failing compiler that retries costs far more than the interpreter it was
+	// meant to beat, and that shows up as multi-hundred-millisecond stalls in a
+	// heavy game rather than as a lower average.
+	//
+	// Which way wins depends on the board and on what the game asks of the JIT,
+	// so it is the player's to choose rather than ours to guess. Default off:
+	// that is what upstream ships, and what the native ARM builds of these games
+	// run with.
+	defs[d].key              = "love_jit";
+	defs[d].desc             = jit_label;
+	defs[d].desc_categorized = jit_label;
+	defs[d].info             = nullptr;
+	defs[d].info_categorized = nullptr;
+	defs[d].category_key     = TIMING_CATEGORY_KEY;
+	defs[d].values[0] = { "on",  "on"  };
+	defs[d].values[1] = { "off", "off" };
+	defs[d].values[2] = { nullptr, nullptr };
+	defs[d].default_value = "on";
+	d++;
+
+	// Single boot.
+	//
+	// The core boots the game, learns its real resolution, and corrects it
+	// through SET_SYSTEM_AV_INFO -- which makes the frontend rebuild the GL
+	// context, so the game boots a second time. That costs roughly 0.4s twice
+	// over, and every shader and texture the game loaded is built twice.
+	//
+	// Reading conf.lua up front avoids it, and works. It is off by default
+	// because on a 15 kHz CRT the context rebuild is also what keeps KMS and the
+	// modeline in agreement: without it the picture sits shifted with a black
+	// band at the top. HDMI does not show that, which is exactly why this is a
+	// choice rather than a default.
+	defs[d].key              = "love_single_boot";
+	defs[d].desc             = singleboot_label;
+	defs[d].desc_categorized = singleboot_label;
+	defs[d].info             = nullptr;
+	defs[d].info_categorized = nullptr;
+	defs[d].category_key     = VIDEO_CATEGORY_KEY;
+	defs[d].values[0] = { "off", "off" };
+	defs[d].values[1] = { "on",  "on"  };
+	defs[d].values[2] = { nullptr, nullptr };
+	defs[d].default_value = "off";
+	d++;
+
 	// The fps option.
 	defs[d].key              = "love_fps";
 	defs[d].desc             = fps_label;
@@ -211,12 +275,27 @@ void build_options_v2(retro_core_option_v2_category *cats,
 	defs[d].info             = nullptr;
 	defs[d].info_categorized = nullptr;
 	defs[d].category_key     = VIDEO_CATEGORY_KEY;
-	defs[d].values[0] = { "100", "100%" };
-	defs[d].values[1] = { "75",  "75%"  };
-	defs[d].values[2] = { "66",  "66%"  };
-	defs[d].values[3] = { "50",  "50%"  };
+	// A 15kHz CRT shows 320x240, so a game laying out for 1024x768 is painting
+	// about ten times the pixels the screen can display -- and a 3D game paints
+	// them several times over, once per pass. Hence a way to render smaller.
+	//
+	// A percentage is a request for less GPU work, not a display size, and the
+	// window backend treats it as such: it fits a standard display mode rather
+	// than handing the display an arbitrary size (see Window::setWindow). A size
+	// no CRT has a mode for gets a synthesised modeline and a soft picture.
+	//
+	// Four rungs, each with a distinct intent. The percentages that used to sit
+	// between them were either redundant once Auto exists (66% of 1024x768 is
+	// the 640x480 Auto already picks) or landed on sizes no display has a mode
+	// for (40% -> 408x306, 25% -> 256x192) -- and 75% was actively harmful,
+	// putting a 60Hz core on 768x576, a PAL mode, which made the frontend
+	// resample the audio and distort it.
+	defs[d].values[0] = { "auto", "Auto" };
+	defs[d].values[1] = { "100",  "100%" };
+	defs[d].values[2] = { "50",   "50%"  };
+	defs[d].values[3] = { "33",   "33%"  };
 	defs[d].values[4] = { nullptr, nullptr };
-	defs[d].default_value = "100";
+	defs[d].default_value = "auto";
 	d++;
 
 	std::memset(&defs[d], 0, sizeof(defs[d]));
@@ -240,14 +319,14 @@ bool set_options_v2(retro_environment_t environ_cb)
 	// All of these are handed to the frontend, which keeps the pointers, so they
 	// must outlive the call -- hence static. Sizes must match what
 	// build_options_v2 writes, and it writes past neither: 4 categories (input,
-	// timing, video, terminator) and NUM_BUTTONS + 3 definitions (the buttons,
-	// fps, render scale, terminator). Adding an option means growing both here
+	// timing, video, terminator) and NUM_BUTTONS + 5 definitions (the buttons,
+	// LuaJIT, single boot, fps, render scale, terminator). Adding an option means growing both here
 	// and in the contract stated above build_options_v2 -- an overrun here would
 	// be silent.
 	static retro_core_option_v2_category   us_cats[4];
-	static retro_core_option_v2_definition us_defs[NUM_BUTTONS + 3];
+	static retro_core_option_v2_definition us_defs[NUM_BUTTONS + 5];
 	static retro_core_option_v2_category   fr_cats[4];
-	static retro_core_option_v2_definition fr_defs[NUM_BUTTONS + 3];
+	static retro_core_option_v2_definition fr_defs[NUM_BUTTONS + 5];
 	static bool built = false;
 
 	if (!built)
@@ -260,6 +339,8 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 "Frame rate. Leave at 60 unless a game runs too fast, or "
 		                 "to match a 50 Hz display.",
 		                 "Frames per second",
+		                 "LuaJIT (turn off if frames stall on your board)",
+		                 "Single boot (faster start; may shift the picture on a CRT)",
 		                 "Video",
 		                 "Rendering. Lowering the render scale makes a heavy 3D "
 		                 "game much cheaper to draw, at the cost of sharpness.",
@@ -272,6 +353,8 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 LOVE_FR_CATEGORY_TIMING_NAME,
 		                 LOVE_FR_CATEGORY_TIMING_INFO,
 		                 LOVE_FR_FPS_LABEL,
+		                 LOVE_FR_JIT_LABEL,
+		                 LOVE_FR_SINGLEBOOT_LABEL,
 		                 LOVE_FR_CATEGORY_VIDEO_NAME,
 		                 LOVE_FR_CATEGORY_VIDEO_INFO,
 		                 LOVE_FR_SCALE_LABEL,
@@ -298,7 +381,7 @@ bool set_options_v2(retro_environment_t environ_cb)
 // the fps option after the buttons.
 void set_options_v1(retro_environment_t environ_cb)
 {
-	static retro_variable vars[NUM_BUTTONS + 3];
+	static retro_variable vars[NUM_BUTTONS + 5];
 
 	for (int i = 0; i < NUM_BUTTONS; i++)
 	{
@@ -324,10 +407,16 @@ void set_options_v1(retro_environment_t environ_cb)
 	vars[NUM_BUTTONS].value = "Frames per second; 60|50|30";
 
 	vars[NUM_BUTTONS + 1].key   = "love_render_scale";
-	vars[NUM_BUTTONS + 1].value = "Render scale; 100|75|66|50";
+	vars[NUM_BUTTONS + 1].value = "Render scale; auto|100|50|33";
 
-	vars[NUM_BUTTONS + 2].key   = nullptr;
-	vars[NUM_BUTTONS + 2].value = nullptr;
+	vars[NUM_BUTTONS + 2].key   = "love_jit";
+	vars[NUM_BUTTONS + 2].value = "LuaJIT; on|off";
+
+	vars[NUM_BUTTONS + 3].key   = "love_single_boot";
+	vars[NUM_BUTTONS + 3].value = "Single boot; off|on";
+
+	vars[NUM_BUTTONS + 4].key   = nullptr;
+	vars[NUM_BUTTONS + 4].value = nullptr;
 
 	environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
 }
@@ -371,17 +460,47 @@ void options_update(retro_environment_t environ_cb)
 	else
 		current_fps = 60.0;
 
-	// Render scale ("100".."50", a percentage).
+	// LuaJIT. Read like the rest, but only ever consumed once, at boot: the
+	// compiler's state is decided before any game code runs.
+	retro_variable jit_var;
+	jit_var.key   = "love_jit";
+	jit_var.value = nullptr;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &jit_var) && jit_var.value != nullptr)
+		current_jit = std::strcmp(jit_var.value, "off") != 0;
+	else
+		current_jit = true;
+
+	// Single boot.
+	retro_variable sb_var;
+	sb_var.key   = "love_single_boot";
+	sb_var.value = nullptr;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &sb_var) && sb_var.value != nullptr)
+		current_single_boot = std::strcmp(sb_var.value, "on") == 0;
+	else
+		current_single_boot = false;
+
+	// Render scale: "auto", or a percentage from "100" down to "25".
+	//
+	// 0.0 is the sentinel for auto -- the window backend reads it as "fit a
+	// standard display mode" rather than "multiply by this". A percentage
+	// cannot suit every game, since it is applied to whatever size the game
+	// happens to ask for: 66% is right for a 1024x768 game and takes a
+	// 320x240 one down to 210x158. Auto leaves the small one alone.
 	retro_variable scale_var;
 	scale_var.key   = "love_render_scale";
 	scale_var.value = nullptr;
 	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &scale_var) && scale_var.value != nullptr)
 	{
-		int pct = std::atoi(scale_var.value);
-		current_render_scale = (pct >= 25 && pct <= 100) ? pct / 100.0 : 1.0;
+		if (std::strcmp(scale_var.value, "auto") == 0)
+			current_render_scale = 0.0;
+		else
+		{
+			int pct = std::atoi(scale_var.value);
+			current_render_scale = (pct >= 25 && pct <= 100) ? pct / 100.0 : 1.0;
+		}
 	}
 	else
-		current_render_scale = 1.0;
+		current_render_scale = 0.0;
 }
 
 int option_key_for_button(unsigned id)
@@ -393,6 +512,16 @@ int option_key_for_button(unsigned id)
 	}
 
 	return 0;
+}
+
+bool option_jit()
+{
+	return current_jit;
+}
+
+bool option_single_boot()
+{
+	return current_single_boot;
 }
 
 double option_fps()

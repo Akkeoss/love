@@ -24,6 +24,10 @@
 #include "common/Vector.h"
 
 #include "Graphics.h"
+
+#ifdef LOVE_ENABLE_LIBRETRO
+#include "libretro_state.h"
+#endif
 #include "font/Font.h"
 #include "StreamBuffer.h"
 #include "math/MathModule.h"
@@ -306,6 +310,21 @@ void Graphics::setActive(bool enable)
 	active = enable;
 }
 
+#ifdef LOVE_ENABLE_LIBRETRO
+void Graphics::libretroBeginFrame()
+{
+	if (!isCreated())
+		return;
+
+	gl.invalidateStateCache();
+
+	// The program is tracked by Shader, not by OpenGL::state, so it needs its
+	// own nudge: re-bind whatever LOVE believes is attached.
+	if (Shader::current != nullptr)
+		((Shader *) Shader::current)->attach();
+}
+#endif
+
 void Graphics::draw(const DrawCommand &cmd)
 {
 	gl.prepareDraw();
@@ -530,6 +549,27 @@ void Graphics::endPass()
 	// Discard the depth/stencil buffer if we're using an internal cached one.
 	if (depthstencil == nullptr && (rts.temporaryRTFlags & (TEMPORARY_RT_DEPTH | TEMPORARY_RT_STENCIL)) != 0)
 		discard({}, true);
+#ifdef LOVE_ENABLE_LIBRETRO
+	// A depth buffer the game attached itself is discarded too, as long as it
+	// is not readable -- nothing can sample it, so nothing can want its
+	// contents after the pass that wrote them.
+	//
+	// This costs nothing on an immediate-mode GPU and a great deal on a tiled
+	// one, which is what every ARM board this core targets has. A tiler keeps
+	// the pass in fast on-chip memory and, at the end, writes every attachment
+	// still considered live back to main memory -- then reads it in again when
+	// that target is next bound. For depth that is never read across passes,
+	// both halves are pure loss.
+	//
+	// It adds up on a renderer that draws the scene several times per frame:
+	// two 1024x1024 shadow maps plus two 1024x768 passes move about 29MB of
+	// depth per frame this way, which is milliseconds of memory bandwidth on a
+	// Pi 5. Upstream cannot assume this -- a desktop driver may keep depth in
+	// VRAM for free, and a game there may legitimately re-bind and keep
+	// depth-testing against it -- so it stays behind LOVE_ENABLE_LIBRETRO.
+	else if (depthstencil != nullptr && !depthstencil->isReadable())
+		discard({}, true);
+#endif
 
 	// Resolve MSAA buffers. MSAA is only supported for 2D render targets so we
 	// don't have to worry about resolving to slices.
@@ -908,6 +948,33 @@ void Graphics::present(void *screenshotCallbackData)
 
 	gl.bindFramebuffer(OpenGL::FRAMEBUFFER_ALL, gl.getDefaultFBO());
 
+#ifdef LOVE_ENABLE_LIBRETRO
+	// Tell the driver the frontend FBO's depth and stencil are dead.
+	//
+	// This costs nothing on an immediate-mode GPU and a great deal on a tiled
+	// one -- which is what every ARM board this core targets has. A tiler works
+	// a screen tile at a time in fast on-chip memory: at the end of a pass it
+	// writes ("resolves") every attachment still considered live back to main
+	// memory, and reloads it when that target is bound again. Depth here is
+	// never read across frames -- the next frame clears it -- so both halves of
+	// that round trip are pure loss, and at 1024x768 they are not small.
+	//
+	// Only under libretro. A standalone LOVE presents to the window's default
+	// framebuffer, where GL_DEPTH/GL_STENCIL are the right enums and the
+	// windowing system owns the buffer's lifetime; a core presents into an FBO
+	// the frontend hands over, whose attachments are ours to discard. The colour
+	// attachment is deliberately NOT listed: that is the frame being shown.
+	if (GLAD_VERSION_4_3 || GLAD_ARB_invalidate_subdata || GLAD_ES_VERSION_3_0
+		|| GLAD_EXT_discard_framebuffer)
+	{
+		GLenum attachments[] = { GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
+		if (GLAD_VERSION_4_3 || GLAD_ARB_invalidate_subdata || GLAD_ES_VERSION_3_0)
+			glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, attachments);
+		else
+			glDiscardFramebufferEXT(GL_FRAMEBUFFER, 2, attachments);
+	}
+#endif
+
 	if (!pendingScreenshotCallbacks.empty())
 	{
 		int w = getPixelWidth();
@@ -1036,9 +1103,18 @@ void Graphics::present(void *screenshotCallbackData)
 
 void Graphics::setScissor(const Rect &rect)
 {
-	flushStreamDraws();
-
 	DisplayState &state = states.back();
+
+	// Nothing to flush when the scissor is not actually changing. Callers
+	// re-assert it freely -- a UI that clips a panel sets the same rectangle
+	// before each widget inside it -- and the flush is what makes that
+	// expensive: it ends the batch, so every draw becomes its own GL draw call.
+	// Measured with the harness under GLES: 51 draws each preceded by the SAME
+	// setScissor cost 5.3ms with 0 of them batched.
+	if (state.scissor && state.scissorRect == rect)
+		return;
+
+	flushStreamDraws();
 
 	if (!gl.isStateEnabled(OpenGL::ENABLE_SCISSOR_TEST))
 		gl.setEnableState(OpenGL::ENABLE_SCISSOR_TEST, true);

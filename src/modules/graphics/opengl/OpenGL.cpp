@@ -211,6 +211,87 @@ bool OpenGL::initContext()
 	return true;
 }
 
+#ifdef LOVE_ENABLE_LIBRETRO
+void OpenGL::invalidateStateCache()
+{
+	if (!contextInitialized)
+		return;
+
+	// Impossible handles, so the next bind of each kind cannot compare equal
+	// and be skipped. Nothing is bound or unbound here: this only drops LOVE's
+	// belief about what is current, and the real binds follow from the drawing
+	// code as usual.
+	const GLuint none = std::numeric_limits<GLuint>::max();
+
+	for (int i = 0; i < (int) BUFFER_MAX_ENUM; i++)
+		state.boundBuffers[i] = none;
+
+	for (int i = 0; i < 2; i++)
+		state.boundFramebuffers[i] = none;
+
+	for (int i = 0; i < TEXTURE_MAX_ENUM; i++)
+		for (size_t j = 0; j < state.boundTextures[i].size(); j++)
+			state.boundTextures[i][j] = none;
+
+	// The texture unit and the vertex attribute arrays are plain GL state
+	// rather than object bindings, so they are re-asserted rather than
+	// forgotten -- there is no "impossible" value to park them at.
+	glActiveTexture(GL_TEXTURE0);
+	state.curTextureUnit = 0;
+
+	// Claim every array is on, then turn them all off for real -- the same
+	// order setupContext() uses. Parking this at 0 instead would be a lie in
+	// the dangerous direction: setVertexAttributes() diffs against it, so an
+	// array LOVE had enabled but the next draw does not want would never be
+	// disabled, and its attribute pointer would still name a buffer the
+	// frontend has since unbound. The draw then reads garbage, or nothing.
+	GLint maxvertexattribs = 1;
+	glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &maxvertexattribs);
+	state.enabledAttribArrays = (uint32) ((1ull << uint32(maxvertexattribs)) - 1);
+	state.instancedAttribArrays = 0;
+	setVertexAttributes(vertex::Attributes(), vertex::BufferBindings());
+
+	// Enables and the cull mode are cheap to re-assert and cannot be probed
+	// without a round trip to the driver, so push LOVE's own values back out.
+	setEnableState(ENABLE_DEPTH_TEST, state.enableState[ENABLE_DEPTH_TEST]);
+	setEnableState(ENABLE_STENCIL_TEST, state.enableState[ENABLE_STENCIL_TEST]);
+	setEnableState(ENABLE_SCISSOR_TEST, state.enableState[ENABLE_SCISSOR_TEST]);
+	setEnableState(ENABLE_FACE_CULL, state.enableState[ENABLE_FACE_CULL]);
+
+	glCullFace(state.faceCullMode);
+	glDepthMask(state.depthWritesEnabled ? GL_TRUE : GL_FALSE);
+	glViewport(state.viewport.x, state.viewport.y, state.viewport.w, state.viewport.h);
+
+	// sRGB is the fifth enable, and it is the one that would go wrong quietly:
+	// setCanvasInternal only calls into GL when the cached flag disagrees with
+	// what the new target wants, so a stale cache means the call is skipped and
+	// the target keeps whatever the frontend left. Re-assert it like the others.
+	if (GLAD_VERSION_1_0 || GLAD_EXT_sRGB_write_control)
+		setEnableState(ENABLE_FRAMEBUFFER_SRGB, state.enableState[ENABLE_FRAMEBUFFER_SRGB]);
+
+	// The constant colour is pushed to a vertex attribute, and only when it
+	// differs from the last one pushed. Park the "last" at NaN so the next
+	// prepareDraw always re-sends it: NaN compares unequal to everything,
+	// including itself, which is exactly the property wanted here.
+	const float nan = std::numeric_limits<float>::quiet_NaN();
+	state.lastConstantColor = Colorf(nan, nan, nan, nan);
+
+	// Point size is plain GL state with no diffing on the way out, so it is
+	// simply re-asserted.
+	if (GLAD_VERSION_1_0)
+		glPointSize(state.pointSize);
+
+	// The bound shader program is cached in Shader::current, which is static
+	// and survives the frame boundary. If the frontend bound its own program,
+	// LOVE still believes its shader is attached and Shader::attach() skips the
+	// glUseProgram. Re-assert the program rather than clearing the pointer:
+	// clearing it would drop the texture-unit and pending-uniform restore that
+	// attach() performs, which nothing else redoes.
+	if (Shader::current != nullptr)
+		glUseProgram((GLuint) Shader::current->getHandle());
+}
+#endif
+
 void OpenGL::setupContext()
 {
 	if (!contextInitialized)
@@ -720,11 +801,25 @@ GLenum OpenGL::getGLBufferUsage(vertex::Usage usage)
 
 void OpenGL::bindBuffer(BufferType type, GLuint buffer)
 {
+#ifdef LOVE_ENABLE_LIBRETRO
+	// The cache has to be bypassed here, for the same reason as the one in
+	// bindFramebuffer: it assumes LOVE owns the context. Under libretro it does
+	// not. The frontend runs its own passes between two retro_run() calls and
+	// leaves its own bindings behind -- RetroArch's glcore driver unbinds the
+	// array and element buffers when it is done drawing the previous frame.
+	// LOVE's cache still believes its own buffer is bound, skips the bind, and
+	// the next draw sources vertices from buffer 0. Where a client array would
+	// be read from a null pointer, that is a segfault inside the driver, with
+	// no GL error and nothing in the log pointing back here.
+	glBindBuffer(getGLBufferType(type), buffer);
+	state.boundBuffers[type] = buffer;
+#else
 	if (state.boundBuffers[type] != buffer)
 	{
 		glBindBuffer(getGLBufferType(type), buffer);
 		state.boundBuffers[type] = buffer;
 	}
+#endif
 }
 
 void OpenGL::deleteBuffer(GLuint buffer)
@@ -824,6 +919,13 @@ void OpenGL::clearDepth(double value)
 void OpenGL::setViewport(const Rect &v)
 {
 	glViewport(v.x, v.y, v.w, v.h);
+
+	// With no canvas bound, setScissor() translates its rectangle through the
+	// viewport height, so the same rectangle means a different glScissor once
+	// the viewport moves. Forget the cached one rather than let it match.
+	if (v.h != state.viewport.h)
+		state.scissor = Rect();
+
 	state.viewport = v;
 }
 
@@ -834,6 +936,16 @@ Rect OpenGL::getViewport() const
 
 void OpenGL::setScissor(const Rect &v, bool canvasActive)
 {
+	// Skip a glScissor that would set the rectangle already in place. Callers
+	// re-assert the scissor freely -- a UI that clips each of its panels sets
+	// the same rect for every widget inside one -- and on some drivers the call
+	// is far from free: measured with the test harness, 51 draws each preceded
+	// by a setScissor cost 5.8ms under GLES against 0.8ms under desktop GL, on
+	// the same machine and the same content. The rectangle is already tracked
+	// for getScissor(), so the comparison costs nothing.
+	if (v == state.scissor)
+		return;
+
 	if (canvasActive)
 		glScissor(v.x, v.y, v.w, v.h);
 	else

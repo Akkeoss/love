@@ -85,6 +85,15 @@ struct State
 	double frame_draw_ms    = 0.0;
 	double frame_present_ms = 0.0;
 
+	// What the renderer actually did this frame, from love.graphics.getStats.
+	// Reported next to a slow frame so a heavy draw says whether it was many
+	// small submissions (draw calls, canvas and shader switches) or few large
+	// ones -- which is the difference between a CPU-side submission cost and a
+	// GPU-side fill cost, and they have opposite fixes.
+	int frame_draw_calls      = 0;
+	int frame_canvas_switches = 0;
+	int frame_shader_switches = 0;
+
 	// --- Paths ---------------------------------------------------------
 	std::string system_dir;
 	std::string save_dir;

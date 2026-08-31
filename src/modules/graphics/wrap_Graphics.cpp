@@ -1576,6 +1576,79 @@ static Mesh *newCustomMesh(lua_State *L)
 
 		luax_catchexcept(L, [&](){ t = instance()->newMesh(vertexformat, numvertices, drawmode, usage); });
 
+		// Fast path: an all-float format, written straight into the mapped
+		// vertex buffer.
+		//
+		// The general loop below calls setVertexAttribute once per attribute per
+		// vertex, and each of those re-validates its indices, re-maps the vertex
+		// buffer and marks a modified range -- inside a luax_catchexcept, so a
+		// C++ try/catch frame as well. For the terrain mesh a voxel mod builds
+		// (245k vertices, {float,3}{float,2}{float,1}) that is ~740k
+		// setVertexAttribute calls and as many try/catch frames, measured at
+		// 36ms on a Pi 5 for one mesh -- two thirds of that frame's update().
+		//
+		// Nothing about that work is needed when every attribute is float: the
+		// components are contiguous in the buffer, so the whole vertex is one
+		// run of floats at a known offset. Map once, write, unmap once.
+		//
+		// Restricted to the all-float case on purpose. Normalised integer
+		// formats go through writeUnorm8Data/writeUnorm16Data, which convert
+		// rather than copy, and reproducing that here would duplicate the
+		// conversion rules for no measured gain -- those formats are not what
+		// large generated meshes use.
+		bool allfloat = true;
+		int totalcomponents = 0;
+		for (const Mesh::AttribFormat &format : vertexformat)
+		{
+			if (format.type != vertex::DATA_FLOAT)
+				allfloat = false;
+			totalcomponents += format.components;
+		}
+
+		// A vertex's components are pushed together before being read, so the
+		// stack has to hold all of them at once plus the vertex table. Only
+		// LUA_MINSTACK (20) slots are guaranteed; a format with more components
+		// than that would overflow silently on a stricter Lua than the one this
+		// happens to be built against.
+		if (allfloat && numvertices > 0 && lua_checkstack(L, totalcomponents + 2))
+		{
+			const size_t stride = t->getVertexStride();
+			char *basedata = nullptr;
+
+			luax_catchexcept(L,
+				[&](){ basedata = (char *) t->mapVertexData(); },
+				[&](bool diderror){ if (diderror) t->release(); }
+			);
+
+			for (size_t vertindex = 0; vertindex < numvertices; vertindex++)
+			{
+				lua_rawgeti(L, 2, (int) (vertindex + 1));
+				if (!lua_istable(L, -1))
+				{
+					// Leave the buffer consistent before unwinding: unmap what was
+					// written so far, then let luaL_error longjmp out. Releasing the
+					// mesh here matches what luax_catchexcept does on the slow path.
+					t->unmapVertexData(0, numvertices * stride);
+					t->release();
+					luaL_error(L, "Expected table at vertex %ld", (long) vertindex + 1);
+				}
+
+				float *out = (float *) (basedata + vertindex * stride);
+
+				for (int c = 1; c <= totalcomponents; c++)
+				{
+					lua_rawgeti(L, -c, c);
+					out[c - 1] = (float) luaL_optnumber(L, -1, 0);
+				}
+
+				lua_pop(L, totalcomponents + 1);
+			}
+
+			t->unmapVertexData(0, numvertices * stride);
+			t->flush();
+			return t;
+		}
+
 		// Maximum possible data size for a single vertex attribute.
 		char data[sizeof(float) * 4];
 

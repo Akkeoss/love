@@ -33,6 +33,15 @@ int option_key_for_button(unsigned id);
 // from it. Valid after the first options_update().
 double option_fps();
 
+// True when the player asked for LuaJIT. Off by default: upstream disables the
+// JIT on ARM because compilation there can fail slowly rather than merely be
+// unavailable, and the native ARM builds of these games ship with it off.
+bool option_jit();
+
+// True when the player asked to skip the second boot by reading conf.lua up
+// front. Off by default -- it is known to shift the picture on a 15 kHz CRT.
+bool option_single_boot();
+
 // The render scale the player selected (1.0, 0.75, 0.66 or 0.5). Applied to the
 // size a game requests from love.window.setMode; the frontend upscales the
 // smaller frame. Valid after the first options_update().
