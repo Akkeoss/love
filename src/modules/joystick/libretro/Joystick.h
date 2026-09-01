@@ -52,6 +52,17 @@ class Joystick final : public love::joystick::Joystick
 {
 public:
 
+	// The 1-based number love.joystick uses for a gamepad button, or 0 when the
+	// button is not one a plain joystick reports. Both the polling path
+	// (isDown) and the event path must go through this, or a game that uses one
+	// and a game that uses the other disagree about which button is which.
+	static int rawButtonNumber(GamepadButton button);
+
+	// How many buttons the pad reports in total, gamepad ones plus the extras
+	// (L2/R2) the gamepad enum has no entry for.
+	static int rawButtonCount();
+
+
 	explicit Joystick(int id);
 	Joystick(int id, int deviceindex);
 

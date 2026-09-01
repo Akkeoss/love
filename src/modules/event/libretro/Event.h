@@ -26,6 +26,7 @@
 #ifdef LOVE_ENABLE_LIBRETRO
 
 #include "event/Event.h"
+#include "joystick/Joystick.h"
 
 namespace love
 {
@@ -56,6 +57,31 @@ public:
 	Message *wait() override;
 
 	const char *getName() const override;
+
+private:
+
+	// The pointer half of pump(): mousemoved/mousepressed/mousereleased, built by
+	// diffing the cursor state the core published this frame.
+	void pumpMouse();
+
+	// The gamepad half: gamepadpressed/gamepadreleased, the joystick* forms, and
+	// axis movement. Games written around a controller listen for these rather
+	// than polling, so a core without them answers no input in such a game.
+	void pumpJoystick();
+
+	// Last frame's pad state, which is what the events are diffed against. The
+	// joystick backend exposes four ports, and LOVE's gamepad enum bounds the
+	// buttons; axes are the two sticks. Kept here rather than in the backend
+	// because they exist only to find edges, which is this class's job.
+	static const int MAX_PORTS = 4;
+	// Two sticks and the two triggers: SDL reports triggers as axes, so they are
+	// axes here too.
+	static const int MAX_AXES  = 6;
+	// L2 and R2, which the gamepad enum has no entry for.
+	static const int NUM_EXTRA_BUTTONS = 2;
+	bool  prevGamepad[MAX_PORTS][love::joystick::Joystick::GAMEPAD_BUTTON_MAX_ENUM] = {};
+	float prevAxis[MAX_PORTS][MAX_AXES] = {};
+	bool  prevExtra[MAX_PORTS][NUM_EXTRA_BUTTONS] = {};
 
 }; // Event
 

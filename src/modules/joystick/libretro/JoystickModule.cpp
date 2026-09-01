@@ -90,12 +90,46 @@ love::joystick::Joystick *JoystickModule::getJoystickFromID(int instanceid)
 	return nullptr;
 }
 
+// Only the ports the frontend says have something on them.
+//
+// The four Joystick objects are built once and never destroyed (there is no
+// hotplug event to hang that off), so "how many pads are there" cannot be the
+// size of that list -- it would always be four, and a game with a player-count
+// menu would offer four players to someone holding one pad. SDL answers with
+// its activeSticks; the equivalent here is the ports the frontend has not
+// declared empty.
+int JoystickModule::connectedCount() const
+{
+	int n = 0;
+	for (auto *stick : joysticks)
+	{
+		if (stick->isConnected())
+			n++;
+	}
+
+	return n;
+}
+
 love::joystick::Joystick *JoystickModule::getJoystick(int joyindex)
 {
-	if (joyindex < 0 || joyindex >= (int) joysticks.size())
+	// joyindex counts connected pads, not ports: with port 2 empty, the pad on
+	// port 3 must still be reachable as joystick 2. Anything else makes a game
+	// enumerating getJoysticks() skip a player.
+	if (joyindex < 0)
 		return nullptr;
 
-	return joysticks[joyindex];
+	for (auto *stick : joysticks)
+	{
+		if (!stick->isConnected())
+			continue;
+
+		if (joyindex == 0)
+			return stick;
+
+		joyindex--;
+	}
+
+	return nullptr;
 }
 
 int JoystickModule::getIndex(const love::joystick::Joystick *joystick)
@@ -111,7 +145,7 @@ int JoystickModule::getIndex(const love::joystick::Joystick *joystick)
 
 int JoystickModule::getJoystickCount() const
 {
-	return (int) joysticks.size();
+	return connectedCount();
 }
 
 // --- Gamepad mappings ----------------------------------------------------

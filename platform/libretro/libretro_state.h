@@ -18,7 +18,7 @@
 namespace love {
 namespace libretro {
 
-#define LOVE_LIBRETRO_VERSION "1.4"
+#define LOVE_LIBRETRO_VERSION "1.5"
 
 // libretro fixes the sample rate for the lifetime of the core, so LOVE's audio
 // backend has to resample to this rather than pick its own.
@@ -51,6 +51,24 @@ struct State
 	// Valid only during retro_run(); the input backends read it from there.
 	retro_input_state_t input_state_cb = nullptr;
 
+	// Rumble, when the frontend offers it. Null means it does not, and
+	// love.joystick's vibration calls then answer honestly that they did nothing.
+	retro_set_rumble_state_t set_rumble = nullptr;
+
+	// Which ports the frontend says have a device on them.
+	//
+	// libretro has no "is a pad plugged in" query, but it does tell us: the
+	// frontend calls retro_set_controller_port_device for every port, and sends
+	// RETRO_DEVICE_NONE for the empty ones. Without recording that, the only
+	// honest answer left is "all four are connected", and a game with a
+	// player-count menu then offers four players when one pad is plugged in.
+	//
+	// Port 0 starts true because a frontend is not obliged to call at all (the
+	// spec says JOYPAD is assumed), and a core that reports no pad in that case
+	// would be worse than one that reports a pad too many.
+	static constexpr int NUM_PORTS = 4;
+	bool port_connected[NUM_PORTS] = { true, false, false, false };
+
 	// Keyboard state, indexed by libretro's retro_key (RETROK_*).
 	//
 	// Two things write into this: the frontend's keyboard callback (a real key on
@@ -67,6 +85,33 @@ struct State
 	static constexpr int NUM_KEYS = 324;   // RETROK_LAST
 	bool keys_now[NUM_KEYS]  = {};
 	bool keys_prev[NUM_KEYS] = {};
+
+	// Pointer state, in game pixels.
+	//
+	// A .love game written for a desktop expects a pointer it can move to an
+	// arbitrary spot -- Balatro is played entirely that way -- and a player on a
+	// Recalbox box has a pad and nothing else. So the left analog stick drives a
+	// cursor the core maintains here, and the frontend's own mouse (if there is
+	// one) moves the same cursor. The game cannot tell which moved it.
+	//
+	// Absolute, unlike libretro's mouse, which only ever reports per-frame
+	// deltas: the position has to be accumulated somewhere, and it belongs here
+	// rather than in the mouse backend, so that the stick and the mouse agree on
+	// one cursor instead of keeping two.
+	double mouse_x = 0.0;
+	double mouse_y = 0.0;
+
+	// How far the cursor moved this frame, for love.mousemoved's dx/dy.
+	double mouse_dx = 0.0;
+	double mouse_dy = 0.0;
+
+	// Mouse buttons, indexed by LOVE's numbering (1 = left, 2 = right,
+	// 3 = middle); index 0 is unused so the numbers read as they do in Lua.
+	// now/prev for the same reason as the keys: libretro reports state, and the
+	// mousepressed/mousereleased edges have to be recovered by diffing.
+	static constexpr int NUM_MOUSE_BUTTONS = 4;
+	bool mouse_now[NUM_MOUSE_BUTTONS]  = {};
+	bool mouse_prev[NUM_MOUSE_BUTTONS] = {};
 
 	// --- Timing --------------------------------------------------------
 	// The frontend paces us, so dt is a constant derived from fps rather than a
@@ -151,6 +196,11 @@ void keyboard_callback(bool down, unsigned keycode, uint32_t character,
 bool key_pressed(int key);
 bool key_released(int key);
 bool key_down(int key);
+
+// The same edges for the mouse buttons, in LOVE's numbering (1 = left).
+bool mouse_pressed(int button);
+bool mouse_released(int button);
+bool mouse_down(int button);
 
 // --- Audio (libretro_audio.cpp) ------------------------------------------
 

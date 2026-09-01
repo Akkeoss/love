@@ -70,6 +70,9 @@ public:
 
 private:
 
+	// How many ports currently have a device on them.
+	int connectedCount() const;
+
 	std::vector<love::joystick::Joystick *> joysticks;
 
 }; // JoystickModule

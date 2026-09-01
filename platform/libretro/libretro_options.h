@@ -17,16 +17,16 @@
 namespace love {
 namespace libretro {
 
+// "no button". Not a RETRO_DEVICE_ID_JOYPAD_* value: libretro numbers those
+// from 0, so a sentinel has to sit outside the range rather than be one of them.
+constexpr unsigned NO_PAD_BUTTON = 0xffffffffu;
+
 // Declare the options to the frontend. Call once, from retro_set_environment.
 void options_set(retro_environment_t environ_cb);
 
 // Read the option values (once at startup, and whenever the frontend signals a
-// change). Rebuilds the button->key mapping the input code reads.
+// change).
 void options_update(retro_environment_t environ_cb);
-
-// The key a pad button currently sends, or 0 for none. id is a
-// RETRO_DEVICE_ID_JOYPAD_* value. Read by update_input().
-int option_key_for_button(unsigned id);
 
 // The target frames per second the player selected (60, 50 or 30). The core
 // reports this to the frontend as the content's fps, and derives the game's dt
@@ -46,6 +46,13 @@ bool option_single_boot();
 // size a game requests from love.window.setMode; the frontend upscales the
 // smaller frame. Valid after the first options_update().
 double option_render_scale();
+
+// How fast the left analog stick moves the pointer, in game pixels per frame at
+// full deflection. Games written for a mouse are otherwise unplayable on a pad.
+double option_pointer_speed();
+
+// The pad button that acts as a left click, or NO_PAD_BUTTON for none.
+unsigned option_pointer_click_button();
 
 } // namespace libretro
 } // namespace love

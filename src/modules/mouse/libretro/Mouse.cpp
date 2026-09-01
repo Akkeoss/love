@@ -75,54 +75,27 @@ bool Mouse::isCursorSupported() const
 
 // --- Position ------------------------------------------------------------
 //
-// libretro's mouse reports movement as a delta per frame, not an absolute
-// position, so an absolute one has to be accumulated here and clamped to the
-// screen. RETRO_DEVICE_POINTER would give absolute coordinates but only for
-// touch devices; the mouse is the more common case on a handheld or a box.
-
-namespace {
-
-double mouse_x = 0.0;
-double mouse_y = 0.0;
-
-void accumulate()
-{
-	if (!love::libretro::state.input_state_cb)
-		return;
-
-	const int16_t dx = love::libretro::state.input_state_cb(0, RETRO_DEVICE_MOUSE, 0,
-	                                        RETRO_DEVICE_ID_MOUSE_X);
-	const int16_t dy = love::libretro::state.input_state_cb(0, RETRO_DEVICE_MOUSE, 0,
-	                                        RETRO_DEVICE_ID_MOUSE_Y);
-
-	mouse_x += dx;
-	mouse_y += dy;
-
-	if (mouse_x < 0.0) mouse_x = 0.0;
-	if (mouse_y < 0.0) mouse_y = 0.0;
-	if (mouse_x > love::libretro::state.width)  mouse_x = love::libretro::state.width;
-	if (mouse_y > love::libretro::state.height) mouse_y = love::libretro::state.height;
-}
-
-} // anonymous namespace
+// The cursor itself lives in the shared state and is moved once per frame by
+// update_pointer(), because two devices drive it: the frontend's mouse (which
+// libretro reports as a per-frame delta, never a position) and the left analog
+// stick, which is what makes a mouse-driven game playable on a pad. Accumulating
+// here instead would give each of them its own cursor, and sample the mouse
+// again on every call rather than once a frame.
 
 double Mouse::getX() const
 {
-	accumulate();
-	return mouse_x;
+	return love::libretro::state.mouse_x;
 }
 
 double Mouse::getY() const
 {
-	accumulate();
-	return mouse_y;
+	return love::libretro::state.mouse_y;
 }
 
 void Mouse::getPosition(double &x, double &y) const
 {
-	accumulate();
-	x = mouse_x;
-	y = mouse_y;
+	x = love::libretro::state.mouse_x;
+	y = love::libretro::state.mouse_y;
 }
 
 // Warping the pointer is meaningless when the frontend owns it, but a game that
@@ -130,18 +103,18 @@ void Mouse::getPosition(double &x, double &y) const
 // not break -- so the position is moved, even though no physical pointer is.
 void Mouse::setX(double x)
 {
-	mouse_x = x;
+	love::libretro::state.mouse_x = x;
 }
 
 void Mouse::setY(double y)
 {
-	mouse_y = y;
+	love::libretro::state.mouse_y = y;
 }
 
 void Mouse::setPosition(double x, double y)
 {
-	mouse_x = x;
-	mouse_y = y;
+	love::libretro::state.mouse_x = x;
+	love::libretro::state.mouse_y = y;
 }
 
 // --- Buttons -------------------------------------------------------------
@@ -151,18 +124,12 @@ bool Mouse::isDown(const std::vector<int> &buttons) const
 	if (!love::libretro::state.input_state_cb)
 		return false;
 
+	// Read from the shared state rather than the frontend, so that the pad button
+	// bound to a click counts as a click here too -- a game polling isDown must
+	// see what a game listening for mousepressed sees.
 	for (int button : buttons)
 	{
-		unsigned id;
-		switch (button)
-		{
-		case 1:  id = RETRO_DEVICE_ID_MOUSE_LEFT;   break;
-		case 2:  id = RETRO_DEVICE_ID_MOUSE_RIGHT;  break;
-		case 3:  id = RETRO_DEVICE_ID_MOUSE_MIDDLE; break;
-		default: continue;   // LOVE numbers buttons from 1; anything else is ours to ignore
-		}
-
-		if (love::libretro::state.input_state_cb(0, RETRO_DEVICE_MOUSE, 0, id))
+		if (love::libretro::mouse_down(button))
 			return true;
 	}
 

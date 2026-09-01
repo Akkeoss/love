@@ -13,11 +13,6 @@ namespace love {
 namespace libretro {
 
 // Categories shown as sub-menus.
-#define LOVE_FR_CATEGORY_INPUT_NAME "Touches (manette -> clavier)"
-#define LOVE_FR_CATEGORY_INPUT_INFO \
-	"Quelle touche du clavier chaque bouton de la manette envoie. A regler " \
-	"selon les touches attendues par le jeu."
-
 #define LOVE_FR_CATEGORY_TIMING_NAME "Cadence"
 #define LOVE_FR_CATEGORY_TIMING_INFO \
 	"Frequence d'images. Laisser a 60 sauf si un jeu va trop vite, ou pour " \
@@ -37,18 +32,13 @@ namespace libretro {
 
 #define LOVE_FR_SCALE_LABEL "Echelle de rendu"
 
-// One label per button, in the same order as BUTTONS[] in libretro_options.cpp.
-static const char *LOVE_FR_BUTTON_LABELS[] =
-{
-	"Bouton A",
-	"Bouton B",
-	"Bouton X",
-	"Bouton Y",
-	"Bouton L",
-	"Bouton R",
-	"Bouton Start",
-	"Bouton Select",
-};
+#define LOVE_FR_CATEGORY_POINTER_NAME "Pointeur"
+#define LOVE_FR_CATEGORY_POINTER_INFO \
+	"Le stick gauche peut deplacer un pointeur de souris, pour les jeux prevus " \
+	"pour la souris."
+
+#define LOVE_FR_POINTER_SPEED_LABEL "Vitesse du pointeur (stick gauche)"
+#define LOVE_FR_POINTER_CLICK_LABEL "Bouton de clic"
 
 } // namespace libretro
 } // namespace love

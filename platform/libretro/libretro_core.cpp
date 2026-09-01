@@ -243,34 +243,34 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
 	kbcb.callback = love::libretro::keyboard_callback;
 	cb(RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK, &kbcb);
 
-	// Tell the frontend what the pad buttons do, so RetroArch's input remapper
-	// shows meaningful names instead of "Button A".
+	// Tell the frontend what the pad buttons do. The pad reaches a game as a pad
+	// (love.joystick), so these are named for what the game sees rather than for
+	// some key the core would send: it sends none. A game that reads the keyboard
+	// instead is served by pad2key, which the player configures per game.
 	static const struct retro_input_descriptor desc[] =
 	{
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "Left (arrow key)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "Up (arrow key)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "Down (arrow key)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "Right (arrow key)" },
-		// These say "keyboard key" rather than a specific key, because the key each
-		// button sends is now a core option the player sets (see options). Naming a
-		// fixed key here would just be a lie once they change it.
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "Keyboard key (see options)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "Keyboard key (see options)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Keyboard key (see options)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Keyboard key (see options)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Keyboard key (see options)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Keyboard key (see options)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "Keyboard key (see options)" },
-		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "Keyboard key (see options)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "D-pad Left" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "D-pad Up" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "D-pad Down" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "D-pad Right" },
+		// Named the way LOVE names them, which is the Xbox/SDL convention: the
+		// RetroPad's B is the bottom button, and LOVE calls the bottom button A.
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "A (bottom) / pointer click" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "B (right)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "X (left)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Y (top)" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Select" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "Left shoulder" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "Right shoulder" },
+		{ 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
+		     RETRO_DEVICE_ID_ANALOG_X, "Pointer X" },
+		{ 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
+		     RETRO_DEVICE_ID_ANALOG_Y, "Pointer Y" },
 		{ 0 },
 	};
 	cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, (void *) desc);
 
-	// One core option per action button, letting the player pick the key it
-	// sends. Different .love games want different keys (Mr. Rescue wants s/d/a,
-	// the defaults are z/x/...), and RetroArch's own control remapper cannot help
-	// here: it maps buttons to buttons, and has no idea what key a game listens
-	// for. Only the core knows that, so only the core can expose the choice.
 	love::libretro::options_set(cb);
 }
 
@@ -289,6 +289,15 @@ RETRO_API void retro_init()
 		log_cb = fallback_log;
 
 	love::libretro::state.log = log_cb;
+
+	// Rumble, if the frontend has it. Asking costs nothing and a refusal is not
+	// an error -- love.joystick then reports honestly that vibration did nothing,
+	// rather than claiming a pad shook when it did not.
+	struct retro_rumble_interface rumble;
+	if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble))
+		love::libretro::state.set_rumble = rumble.set_rumble_state;
+	else
+		love::libretro::state.set_rumble = nullptr;
 
 	const char *dir = nullptr;
 	if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir)
@@ -798,6 +807,12 @@ RETRO_API void *retro_get_memory_data(unsigned id) { (void) id; return nullptr; 
 RETRO_API size_t retro_get_memory_size(unsigned id) { (void) id; return 0; }
 
 RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device)
-{ (void) port; (void) device; }
+{
+	// The frontend telling us what is plugged into each port -- the only source
+	// of that information a core has. RETRO_DEVICE_NONE means the port is empty;
+	// anything else is a device love.joystick should report.
+	if (port < (unsigned) love::libretro::State::NUM_PORTS)
+		love::libretro::state.port_connected[port] = (device != RETRO_DEVICE_NONE);
+}
 
 RETRO_API unsigned retro_get_region() { return RETRO_REGION_NTSC; }

@@ -2,8 +2,8 @@
  * libretro_options.cpp -- see libretro_options.h.
  *
  * The options are declared twice, on purpose. Modern frontends get the V2 form,
- * which groups them under a named category (a sub-menu in RetroArch) instead of
- * scattering eight "Button X" entries through the main list. Older frontends
+ * which groups them under named categories (sub-menus in RetroArch) instead of
+ * scattering every entry through one flat list. Older frontends
  * that do not understand V2 fall back to the flat V1 form, so the options never
  * simply vanish.
  */
@@ -22,73 +22,7 @@ namespace libretro {
 
 namespace {
 
-// The keys a button can be mapped to, as they appear in the frontend menu.
-//
-// A curated shortlist, not every key LOVE knows: a menu offering forty values is
-// unusable on a gamepad. It covers what .love games actually bind -- the letters
-// most used for actions, the arrows, and the special keys games check for menus.
-// "none" lets a player silence a button.
-struct KeyChoice
-{
-	const char *name;   // shown in the menu, and stored as the option value
-	int retro_key;      // 0 for "none"
-};
-
-const KeyChoice KEY_CHOICES[] =
-{
-	{ "none",   0 },
-
-	{ "z", RETROK_z }, { "x", RETROK_x }, { "c", RETROK_c }, { "v", RETROK_v },
-	{ "a", RETROK_a }, { "s", RETROK_s }, { "d", RETROK_d }, { "w", RETROK_w },
-	{ "q", RETROK_q }, { "e", RETROK_e }, { "f", RETROK_f }, { "r", RETROK_r },
-
-	{ "space",  RETROK_SPACE },
-	{ "return", RETROK_RETURN },
-	{ "escape", RETROK_ESCAPE },
-	{ "lshift", RETROK_LSHIFT },
-	{ "lctrl",  RETROK_LCTRL },
-	{ "tab",    RETROK_TAB },
-
-	{ "up",    RETROK_UP },
-	{ "down",  RETROK_DOWN },
-	{ "left",  RETROK_LEFT },
-	{ "right", RETROK_RIGHT },
-
-	{ "1", RETROK_1 }, { "2", RETROK_2 }, { "3", RETROK_3 },
-};
-
-constexpr int NUM_CHOICES = (int) (sizeof(KEY_CHOICES) / sizeof(KEY_CHOICES[0]));
-
-// The configurable buttons, each with the key it defaults to. Defaults are the
-// old fixed mapping, so a player who changes nothing gets exactly what worked
-// before -- the conventions most .love games follow.
-struct ButtonOption
-{
-	unsigned    pad_id;        // RETRO_DEVICE_ID_JOYPAD_*
-	const char *key;           // core option variable key
-	const char *label;         // shown in the menu
-	const char *default_value; // one of KEY_CHOICES[].name
-	int         current;       // resolved retro_key, filled by options_update
-};
-
-ButtonOption BUTTONS[] =
-{
-	{ RETRO_DEVICE_ID_JOYPAD_A,      "love_btn_a",      "Button A",      "z",      RETROK_z },
-	{ RETRO_DEVICE_ID_JOYPAD_B,      "love_btn_b",      "Button B",      "x",      RETROK_x },
-	{ RETRO_DEVICE_ID_JOYPAD_X,      "love_btn_x",      "Button X",      "c",      RETROK_c },
-	{ RETRO_DEVICE_ID_JOYPAD_Y,      "love_btn_y",      "Button Y",      "v",      RETROK_v },
-	{ RETRO_DEVICE_ID_JOYPAD_L,      "love_btn_l",      "Button L",      "q",      RETROK_q },
-	{ RETRO_DEVICE_ID_JOYPAD_R,      "love_btn_r",      "Button R",      "e",      RETROK_e },
-	{ RETRO_DEVICE_ID_JOYPAD_START,  "love_btn_start",  "Button Start",  "return", RETROK_RETURN },
-	// Select defaults to nothing on purpose. It is easy to press by accident, and
-	// escape -- the obvious mapping -- is what many .love games read to quit. A
-	// player who wants Select to do something can map it; by default it is safe.
-	{ RETRO_DEVICE_ID_JOYPAD_SELECT, "love_btn_select", "Button Select", "none",   0 },
-};
-
-constexpr int NUM_BUTTONS = (int) (sizeof(BUTTONS) / sizeof(BUTTONS[0]));
-
-const char *CATEGORY_KEY = "input_mapping";
+const char *POINTER_CATEGORY_KEY = "pointer";
 const char *TIMING_CATEGORY_KEY = "timing";
 const char *VIDEO_CATEGORY_KEY = "video";
 
@@ -116,6 +50,58 @@ bool current_jit = true;
 // trade-off to make for a player without asking.
 bool current_single_boot = false;
 
+// The pointer.
+//
+// Speed is in game pixels per frame at full stick deflection, and 0 means the
+// core does not drive a cursor at all. Expressed in the game's own pixels rather
+// than the screen's so the feel does not change with the render scale.
+//
+// Off by default, and that default was bought with a bug. A game that handles the
+// pad itself often keeps its own on-screen cursor and watches the system mouse to
+// decide who is in charge: gen1recomp drops its pad cursor the moment
+// love.mouse.getPosition moves more than 3 pixels (src/ui/PadCursor.lua). A core
+// cursor riding the same stick makes that game's cursor vanish as soon as the
+// stick is touched.
+double current_pointer_speed = 0.0;
+
+// The pad button that clicks. NO_PAD_BUTTON means the stick moves a cursor that
+// cannot click, which is only useful if the game reads the position alone.
+unsigned current_pointer_click = RETRO_DEVICE_ID_JOYPAD_B;
+
+// The pad buttons a click can be bound to, named as the RetroPad names them.
+struct ClickChoice
+{
+	const char *name;
+	unsigned    pad_id;
+};
+
+const ClickChoice CLICK_CHOICES[] =
+{
+	{ "b",    RETRO_DEVICE_ID_JOYPAD_B },
+	{ "a",    RETRO_DEVICE_ID_JOYPAD_A },
+	{ "y",    RETRO_DEVICE_ID_JOYPAD_Y },
+	{ "x",    RETRO_DEVICE_ID_JOYPAD_X },
+	{ "l",    RETRO_DEVICE_ID_JOYPAD_L },
+	{ "r",    RETRO_DEVICE_ID_JOYPAD_R },
+	{ "none", NO_PAD_BUTTON },
+};
+
+constexpr int NUM_CLICK_CHOICES = (int) (sizeof(CLICK_CHOICES) / sizeof(CLICK_CHOICES[0]));
+
+unsigned click_from_name(const char *name)
+{
+	if (name == nullptr)
+		return RETRO_DEVICE_ID_JOYPAD_B;
+
+	for (const ClickChoice &c : CLICK_CHOICES)
+	{
+		if (std::strcmp(c.name, name) == 0)
+			return c.pad_id;
+	}
+
+	return RETRO_DEVICE_ID_JOYPAD_B;
+}
+
 double fps_from_name(const char *name)
 {
 	if (name == nullptr)
@@ -127,36 +113,17 @@ double fps_from_name(const char *name)
 	return NTSC_FPS;
 }
 
-int key_from_name(const char *name)
-{
-	if (name == nullptr)
-		return 0;
-
-	for (const KeyChoice &c : KEY_CHOICES)
-	{
-		if (std::strcmp(c.name, name) == 0)
-			return c.retro_key;
-	}
-
-	return 0;
-}
-
-// The V1 description strings ("Label; default|other|...") the frontend holds
-// pointers into, so they must outlive the call: built once, kept static.
-std::string v1_strings[NUM_BUTTONS];
-
 // Build a full options set (categories + definitions) into caller-owned static
 // storage, using the button labels and category strings passed in. One call per
 // language: English is the reference, French (or another) is the translation.
 //
 // The value list -- the keys a button can send -- is the same in every language,
 // so it is not translated.
-// cats must hold 4 entries (input, timing, video, terminator); defs must hold
-// NUM_BUTTONS + 3 (the buttons, the fps option, the render scale, terminator).
+// cats must hold 4 entries (timing, video, pointer, terminator); defs must hold
+// 7 (LuaJIT, single boot, fps, render scale, pointer speed, pointer click,
+// terminator).
 void build_options_v2(retro_core_option_v2_category *cats,
                       retro_core_option_v2_definition *defs,
-                      const char *input_cat_name,
-                      const char *input_cat_info,
                       const char *timing_cat_name,
                       const char *timing_cat_info,
                       const char *fps_label,
@@ -165,40 +132,23 @@ void build_options_v2(retro_core_option_v2_category *cats,
                       const char *video_cat_name,
                       const char *video_cat_info,
                       const char *scale_label,
-                      const char *const *button_labels)
+                      const char *pointer_cat_name,
+                      const char *pointer_cat_info,
+                      const char *pointer_speed_label,
+                      const char *pointer_click_label)
 {
-	cats[0].key  = CATEGORY_KEY;
-	cats[0].desc = input_cat_name;
-	cats[0].info = input_cat_info;
-	cats[1].key  = TIMING_CATEGORY_KEY;
-	cats[1].desc = timing_cat_name;
-	cats[1].info = timing_cat_info;
-	cats[2].key  = VIDEO_CATEGORY_KEY;
-	cats[2].desc = video_cat_name;
-	cats[2].info = video_cat_info;
+	cats[0].key  = TIMING_CATEGORY_KEY;
+	cats[0].desc = timing_cat_name;
+	cats[0].info = timing_cat_info;
+	cats[1].key  = VIDEO_CATEGORY_KEY;
+	cats[1].desc = video_cat_name;
+	cats[1].info = video_cat_info;
+	cats[2].key  = POINTER_CATEGORY_KEY;
+	cats[2].desc = pointer_cat_name;
+	cats[2].info = pointer_cat_info;
 	std::memset(&cats[3], 0, sizeof(cats[3]));
 
 	int d = 0;
-
-	for (int b = 0; b < NUM_BUTTONS; b++, d++)
-	{
-		defs[d].key              = BUTTONS[b].key;
-		defs[d].desc             = button_labels[b];
-		defs[d].desc_categorized = button_labels[b];
-		defs[d].info             = nullptr;
-		defs[d].info_categorized = nullptr;
-		defs[d].category_key     = CATEGORY_KEY;
-
-		for (int c = 0; c < NUM_CHOICES; c++)
-		{
-			defs[d].values[c].value = KEY_CHOICES[c].name;
-			defs[d].values[c].label = KEY_CHOICES[c].name;
-		}
-		defs[d].values[NUM_CHOICES].value = nullptr;
-		defs[d].values[NUM_CHOICES].label = nullptr;
-
-		defs[d].default_value = BUTTONS[b].default_value;
-	}
 
 	// The LuaJIT option.
 	//
@@ -298,15 +248,40 @@ void build_options_v2(retro_core_option_v2_category *cats,
 	defs[d].default_value = "auto";
 	d++;
 
+	// Pointer speed. See current_pointer_speed for why Off is the default.
+	defs[d].key              = "love_pointer_speed";
+	defs[d].desc             = pointer_speed_label;
+	defs[d].desc_categorized = pointer_speed_label;
+	defs[d].info             = nullptr;
+	defs[d].info_categorized = nullptr;
+	defs[d].category_key     = POINTER_CATEGORY_KEY;
+	defs[d].values[0] = { "0",  "Off"    };
+	defs[d].values[1] = { "12", "Normal" };
+	defs[d].values[2] = { "6",  "Slow"   };
+	defs[d].values[3] = { "20", "Fast"   };
+	defs[d].values[4] = { nullptr, nullptr };
+	defs[d].default_value = "0";
+	d++;
+
+	// Which button clicks.
+	defs[d].key              = "love_pointer_click";
+	defs[d].desc             = pointer_click_label;
+	defs[d].desc_categorized = pointer_click_label;
+	defs[d].info             = nullptr;
+	defs[d].info_categorized = nullptr;
+	defs[d].category_key     = POINTER_CATEGORY_KEY;
+	for (int c = 0; c < NUM_CLICK_CHOICES; c++)
+	{
+		defs[d].values[c].value = CLICK_CHOICES[c].name;
+		defs[d].values[c].label = CLICK_CHOICES[c].name;
+	}
+	defs[d].values[NUM_CLICK_CHOICES].value = nullptr;
+	defs[d].values[NUM_CLICK_CHOICES].label = nullptr;
+	defs[d].default_value = "b";
+	d++;
+
 	std::memset(&defs[d], 0, sizeof(defs[d]));
 }
-
-// The English button labels, matching BUTTONS[] order.
-const char *const EN_BUTTON_LABELS[NUM_BUTTONS] =
-{
-	"Button A", "Button B", "Button X", "Button Y",
-	"Button L", "Button R", "Button Start", "Button Select",
-};
 
 // Try the V2 (categorised) form, with translations. Returns false if the
 // frontend does not support V2, so the caller can fall back to V1.
@@ -318,23 +293,20 @@ bool set_options_v2(retro_environment_t environ_cb)
 
 	// All of these are handed to the frontend, which keeps the pointers, so they
 	// must outlive the call -- hence static. Sizes must match what
-	// build_options_v2 writes, and it writes past neither: 4 categories (input,
-	// timing, video, terminator) and NUM_BUTTONS + 5 definitions (the buttons,
-	// LuaJIT, single boot, fps, render scale, terminator). Adding an option means growing both here
-	// and in the contract stated above build_options_v2 -- an overrun here would
-	// be silent.
+	// build_options_v2 writes, and it writes past neither: 4 categories (timing,
+	// video, pointer, terminator) and 7 definitions (LuaJIT, single boot, fps,
+	// render scale, pointer speed, pointer click, terminator). Adding an option
+	// means growing both here and in the contract stated above build_options_v2 --
+	// an overrun here would be silent.
 	static retro_core_option_v2_category   us_cats[4];
-	static retro_core_option_v2_definition us_defs[NUM_BUTTONS + 5];
+	static retro_core_option_v2_definition us_defs[7];
 	static retro_core_option_v2_category   fr_cats[4];
-	static retro_core_option_v2_definition fr_defs[NUM_BUTTONS + 5];
+	static retro_core_option_v2_definition fr_defs[7];
 	static bool built = false;
 
 	if (!built)
 	{
 		build_options_v2(us_cats, us_defs,
-		                 "Input mapping",
-		                 "Which keyboard key each gamepad button sends. Set these "
-		                 "to match the keys the game expects.",
 		                 "Timing",
 		                 "Frame rate. Leave at 60 unless a game runs too fast, or "
 		                 "to match a 50 Hz display.",
@@ -345,11 +317,13 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 "Rendering. Lowering the render scale makes a heavy 3D "
 		                 "game much cheaper to draw, at the cost of sharpness.",
 		                 "Render scale",
-		                 EN_BUTTON_LABELS);
+		                 "Pointer",
+		                 "The left analog stick can move a mouse pointer, for "
+		                 "games meant to be played with a mouse.",
+		                 "Pointer speed (left stick)",
+		                 "Pointer click button");
 
 		build_options_v2(fr_cats, fr_defs,
-		                 LOVE_FR_CATEGORY_INPUT_NAME,
-		                 LOVE_FR_CATEGORY_INPUT_INFO,
 		                 LOVE_FR_CATEGORY_TIMING_NAME,
 		                 LOVE_FR_CATEGORY_TIMING_INFO,
 		                 LOVE_FR_FPS_LABEL,
@@ -358,7 +332,10 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 LOVE_FR_CATEGORY_VIDEO_NAME,
 		                 LOVE_FR_CATEGORY_VIDEO_INFO,
 		                 LOVE_FR_SCALE_LABEL,
-		                 LOVE_FR_BUTTON_LABELS);
+		                 LOVE_FR_CATEGORY_POINTER_NAME,
+		                 LOVE_FR_CATEGORY_POINTER_INFO,
+		                 LOVE_FR_POINTER_SPEED_LABEL,
+		                 LOVE_FR_POINTER_CLICK_LABEL);
 		built = true;
 	}
 
@@ -377,46 +354,31 @@ bool set_options_v2(retro_environment_t environ_cb)
 	return environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL, &intl);
 }
 
-// The flat V1 fallback: no categories, just "Label; a|b|c". One extra slot for
-// the fps option after the buttons.
+// The flat V1 fallback: no categories, just "Label; a|b|c".
 void set_options_v1(retro_environment_t environ_cb)
 {
-	static retro_variable vars[NUM_BUTTONS + 5];
+	static retro_variable vars[7];
 
-	for (int i = 0; i < NUM_BUTTONS; i++)
-	{
-		std::string s = BUTTONS[i].label;
-		s += "; ";
-		s += BUTTONS[i].default_value;
+	vars[0].key   = "love_fps";
+	vars[0].value = "Frames per second; 60|50|30";
 
-		for (const KeyChoice &c : KEY_CHOICES)
-		{
-			if (std::strcmp(c.name, BUTTONS[i].default_value) != 0)
-			{
-				s += "|";
-				s += c.name;
-			}
-		}
+	vars[1].key   = "love_render_scale";
+	vars[1].value = "Render scale; auto|100|50|33";
 
-		v1_strings[i] = s;
-		vars[i].key   = BUTTONS[i].key;
-		vars[i].value = v1_strings[i].c_str();
-	}
+	vars[2].key   = "love_jit";
+	vars[2].value = "LuaJIT; on|off";
 
-	vars[NUM_BUTTONS].key   = "love_fps";
-	vars[NUM_BUTTONS].value = "Frames per second; 60|50|30";
+	vars[3].key   = "love_single_boot";
+	vars[3].value = "Single boot; off|on";
 
-	vars[NUM_BUTTONS + 1].key   = "love_render_scale";
-	vars[NUM_BUTTONS + 1].value = "Render scale; auto|100|50|33";
+	vars[4].key   = "love_pointer_speed";
+	vars[4].value = "Pointer speed (left stick); 0|12|6|20";
 
-	vars[NUM_BUTTONS + 2].key   = "love_jit";
-	vars[NUM_BUTTONS + 2].value = "LuaJIT; on|off";
+	vars[5].key   = "love_pointer_click";
+	vars[5].value = "Pointer click button; b|a|y|x|l|r|none";
 
-	vars[NUM_BUTTONS + 3].key   = "love_single_boot";
-	vars[NUM_BUTTONS + 3].value = "Single boot; off|on";
-
-	vars[NUM_BUTTONS + 4].key   = nullptr;
-	vars[NUM_BUTTONS + 4].value = nullptr;
+	vars[6].key   = nullptr;
+	vars[6].value = nullptr;
 
 	environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
 }
@@ -438,18 +400,6 @@ void options_update(retro_environment_t environ_cb)
 {
 	if (environ_cb == nullptr)
 		return;
-
-	for (int i = 0; i < NUM_BUTTONS; i++)
-	{
-		retro_variable var;
-		var.key   = BUTTONS[i].key;
-		var.value = nullptr;
-
-		if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value != nullptr)
-			BUTTONS[i].current = key_from_name(var.value);
-		else
-			BUTTONS[i].current = key_from_name(BUTTONS[i].default_value);
-	}
 
 	// fps.
 	retro_variable fps_var;
@@ -501,22 +451,39 @@ void options_update(retro_environment_t environ_cb)
 	}
 	else
 		current_render_scale = 0.0;
-}
 
-int option_key_for_button(unsigned id)
-{
-	for (int i = 0; i < NUM_BUTTONS; i++)
-	{
-		if (BUTTONS[i].pad_id == id)
-			return BUTTONS[i].current;
-	}
+	// Pointer speed, in game pixels per frame at full stick deflection.
+	retro_variable ptr_var;
+	ptr_var.key   = "love_pointer_speed";
+	ptr_var.value = nullptr;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &ptr_var) && ptr_var.value != nullptr)
+		current_pointer_speed = std::atof(ptr_var.value);
+	else
+		current_pointer_speed = 0.0;
 
-	return 0;
+	// Which pad button clicks.
+	retro_variable click_var;
+	click_var.key   = "love_pointer_click";
+	click_var.value = nullptr;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &click_var) && click_var.value != nullptr)
+		current_pointer_click = click_from_name(click_var.value);
+	else
+		current_pointer_click = RETRO_DEVICE_ID_JOYPAD_B;
 }
 
 bool option_jit()
 {
 	return current_jit;
+}
+
+double option_pointer_speed()
+{
+	return current_pointer_speed;
+}
+
+unsigned option_pointer_click_button()
+{
+	return current_pointer_click;
 }
 
 bool option_single_boot()
