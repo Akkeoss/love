@@ -262,6 +262,26 @@ void OpenGL::invalidateStateCache()
 	glDepthMask(state.depthWritesEnabled ? GL_TRUE : GL_FALSE);
 	glViewport(state.viewport.x, state.viewport.y, state.viewport.w, state.viewport.h);
 
+	// Forget the scissor RECTANGLE, not just the enable above.
+	//
+	// setScissor() skips a glScissor that would set the rectangle already in
+	// place -- a real optimisation, measured, and correct while LOVE owns the
+	// context. Across a frame boundary it is not: the frontend can leave its own
+	// box behind, LOVE still believes its own is current, and the skip means the
+	// game is clipped to the frontend's rectangle for the whole frame. The
+	// enable is re-asserted right above, which makes it worse rather than
+	// better -- scissoring is switched back on, with the wrong box.
+	//
+	// Note that setViewport() would have done this, but only when the viewport
+	// HEIGHT changes; the glViewport above deliberately bypasses it. Parking an
+	// empty Rect here is the same trick used for lastConstantColor below: a
+	// value the next real call cannot compare equal to.
+	//
+	// Reproduced with the harness at --dirty-state 5 (glScissor(7,11,3,3) left
+	// behind): gen1recomp rendered 18% of its pixels differently on a still
+	// frame. Without this, the skip is silent -- no GL error, nothing logged.
+	state.scissor = Rect();
+
 	// sRGB is the fifth enable, and it is the one that would go wrong quietly:
 	// setCanvasInternal only calls into GL when the cached flag disagrees with
 	// what the new target wants, so a stale cache means the call is skipped and

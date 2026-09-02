@@ -322,6 +322,44 @@ void Graphics::libretroBeginFrame()
 	// own nudge: re-bind whatever LOVE believes is attached.
 	if (Shader::current != nullptr)
 		((Shader *) Shader::current)->attach();
+
+	// The scissor rectangle is cached at TWO levels, and
+	// OpenGL::invalidateStateCache only reaches the lower one. Graphics::
+	// setScissor returns early when the game re-asserts the rectangle it
+	// already has -- which is the normal shape of UI code -- so that call would
+	// never reach the GL layer, and the frontend's box would outlive the
+	// invalidation underneath it.
+	//
+	// So push LOVE's own rectangle back out to GL right here, while the display
+	// state still says what it should be. Straight to gl.setScissor, not
+	// through Graphics::setScissor: the display state is already correct and
+	// must not be touched -- the game can read it back with
+	// love.graphics.getScissor, so clearing it to force the call through would
+	// be a lie visible from Lua.
+	if (states.back().scissor)
+		gl.setScissor(states.back().scissorRect, isCanvasActive());
+
+	// Blending, which nothing else here can re-assert.
+	//
+	// It lives in Graphics' display state, not in OpenGL::state, so
+	// invalidateStateCache() cannot reach it -- and both halves of it are set
+	// exactly once and then trusted forever: glEnable(GL_BLEND) in setMode, and
+	// the blend function only when a game calls setBlendMode. A game that picks
+	// its blend mode at load time and never changes it -- which is most of them
+	// -- therefore inherits whatever the frontend left.
+	//
+	// Reproduced with the harness: at --dirty-state 4, a frontend leaving
+	// glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA) behind (premultiplied alpha,
+	// a perfectly ordinary thing for it to draw its own pass with) changed
+	// 11.5% of gen1recomp's pixels, at full amplitude, on a still frame. LOVE's
+	// own default is BLEND_ALPHA/MULTIPLY, whose srcRGB is GL_SRC_ALPHA, so the
+	// game rendered every blended surface with the frontend's function instead
+	// of its own -- no GL error, nothing in any log.
+	//
+	// setBlendMode re-derives both from the display state and always emits them,
+	// so calling it with what LOVE already believes is set restores GL to match.
+	glEnable(GL_BLEND);
+	setBlendMode(states.back().blendMode, states.back().blendAlphaMode);
 }
 #endif
 

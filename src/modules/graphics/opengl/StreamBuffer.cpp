@@ -204,6 +204,20 @@ protected:
 	// Deep enough to cover the batches one frame issues (18 measured in the
 	// heaviest frame seen) with room to spare, so a slot is never reused while
 	// the GPU could still be reading it.
+	//
+	// It is not free, and the cost is not only libretro's: this class is also
+	// what a standalone LOVE uses on GLES, and on a desktop core profile with
+	// neither pinned memory nor ARB_buffer_storage. Graphics::setMode creates
+	// three of these (1MB + 256KB + 128KB), so the ring turns 1.4MB of buffer
+	// storage into 33MB wherever it is taken.
+	//
+	// 24 has not been shown to be necessary -- 18 batches were measured, and 8
+	// would still cover that with margin at 11MB. Lowering it is a real
+	// candidate, but the measurement that decides it has to be made on a tiled
+	// GPU (the Pi 5's V3D): the stall this ring exists to avoid does not
+	// reproduce on an immediate-mode desktop GPU, so an x86 run would show no
+	// difference at any size and prove nothing. Left at 24 until then --
+	// shrinking it on a machine that cannot see the failure would be guessing.
 	static const int RING_SIZE = 24;
 
 	GLuint vbo;

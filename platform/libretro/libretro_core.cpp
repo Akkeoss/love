@@ -680,10 +680,12 @@ RETRO_API void retro_run()
 		// from nothing, firing the expensive path even for a game that runs at
 		// exactly the size already announced.
 		//
-		// With peek_game_size disabled (see retro_load_game) that seed is the
-		// 800x600 default, so a game declaring another size does pay one
-		// SET_SYSTEM_AV_INFO at launch -- deliberately, because the context
-		// rebuild it triggers is what keeps the picture right on a 15 kHz CRT.
+		// With peek_game_size doing its job (see retro_load_game) the seed is
+		// already the game's own size, so a game that declares one in conf.lua
+		// pays no SET_SYSTEM_AV_INFO at launch and boots once. A game that
+		// declares none -- Balatro asks for 0x0 -- has nothing to read, is
+		// seeded with the 800x600 default, and still pays one reallocation and
+		// the reboot that comes with it.
 		static unsigned last_w = reported_w;
 		static unsigned last_h = reported_h;
 		static unsigned fbo_w  = reported_w;   // what the frontend has allocated

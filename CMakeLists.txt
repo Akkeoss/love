@@ -81,6 +81,60 @@ if(LOVE_LIBRETRO)
 		${CMAKE_SOURCE_DIR}/platform/libretro
 		${CMAKE_SOURCE_DIR}/platform/libretro/include
 	)
+
+	# Link-time optimisation, off by default.
+	#
+	#   cmake -B build -DLOVE_LIBRETRO=ON -DLOVE_LIBRETRO_LTO=ON
+	#
+	# The reason is size: the ARM64 core goes from 5.42MB to 4.48MB (-17%), which
+	# counts on a board where the whole system image is budgeted. Rendering is
+	# bit-identical (checked over 5 games x GL/GLES x --dirty-state 0/4/5) and all
+	# 25 retro_* entry points survive. A speed gain was also measured on x86
+	# (+3.4% on gen1recomp under GLES) but it did not reproduce on a lighter game,
+	# so treat the size as the reason and any speed as a bonus.
+	#
+	# It does NOT help the LuaJIT mcode failure on ARM: verified on a Pi 5, the
+	# JIT gives up at the same point with and without LTO. Freeing 940KB of the
+	# +-128MB window is not what that problem needs.
+	#
+	# Set HERE, before any target is defined, and with the directory-wide
+	# add_compile_options rather than target_compile_options. The core statically
+	# links LOVE's modules and the third-party archives (Box2D, PhysFS,
+	# LuaSocket, glslang...), which are most of the binary: flagging only the
+	# love_libretro target leaves all of those compiled normally, and measured on
+	# ARM64 that gives 5.08MB instead of 4.48MB -- about half the gain, for the
+	# same build time.
+	#
+	# Deliberately NOT CMAKE_INTERPROCEDURAL_OPTIMIZATION, and that is the point
+	# of spelling the flags out: this project sets
+	# cmake_minimum_required(VERSION 3.1), which leaves policy CMP0069 at OLD, and
+	# under OLD that variable is IGNORED for every compiler except Intel --
+	# silently, with no warning. Setting it produced a binary byte-for-byte
+	# identical to the non-LTO one, and an entire A/B benchmark was run against it
+	# before the matching MD5s gave that away. If CMP0069 is ever moved to NEW,
+	# the variable becomes usable and this can be simplified.
+	#
+	# -ffat-lto-objects keeps a regular object next to the LTO bytecode. The core
+	# links LOVE's static archives with --whole-archive, and pure-LTO members in a
+	# plain `ar` archive are a known way to lose symbols at link time; the fat
+	# objects cost build time and nothing in the output.
+	option(LOVE_LIBRETRO_LTO "Build the libretro core with link-time optimisation" OFF)
+
+	if(LOVE_LIBRETRO_LTO)
+		include(CheckCXXCompilerFlag)
+		check_cxx_compiler_flag(-flto=auto LOVE_LIBRETRO_HAS_FLTO)
+
+		if(LOVE_LIBRETRO_HAS_FLTO)
+			add_compile_options(-flto=auto -ffat-lto-objects)
+			add_link_options(-flto=auto)
+			message(STATUS "libretro core: LTO enabled")
+		else()
+			# Said out loud rather than ignored: a silently dropped LTO request is
+			# exactly the failure described above.
+			message(WARNING "LOVE_LIBRETRO_LTO=ON but the compiler rejects "
+			                "-flto=auto; building without it")
+		endif()
+	endif()
 endif()
 
 if(LOVE_JIT)
@@ -1957,6 +2011,7 @@ if(LOVE_LIBRETRO)
 			"-Wl,--version-script=${CMAKE_SOURCE_DIR}/platform/libretro/link.T"
 		)
 	endif()
+
 endif()
 
 if(LOVE_EXTRA_DEPENDECIES)

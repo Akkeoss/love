@@ -158,11 +158,17 @@ extern State state;
 // which reboots LOVE from scratch. Does nothing if the game has no conf.lua or
 // does not set a size -- the defaults then stand, exactly as before.
 //
-// CURRENTLY NOT CALLED. It works, and it does remove the second boot, but it
-// breaks the picture on a 15 kHz CRT: see the call site in retro_load_game for
-// why the context rebuild that the second boot brings is what keeps KMS and the
-// modeline in agreement. Kept here rather than deleted so the next attempt
-// starts from working code and the note that goes with it.
+// This was disabled for a long time, on the evidence that a 15 kHz CRT needed
+// the context rebuild that the second boot brings to keep KMS and the modeline
+// in agreement. That evidence was gathered while the probe itself was broken:
+// it built the settings table without t.audio, so any conf.lua touching t.audio
+// errored before reaching the size and the 800x600 default was reported anyway.
+// The display was handed a size the game had not asked for, and only the
+// rebuild straightened it out.
+//
+// With the probe fixed it is called unconditionally from retro_load_game, and
+// the single boot was checked on a real 15 kHz CRT with Mr. Rescue -- the game
+// whose black band started the whole affair: identical modeline, no offset.
 void peek_game_size(const std::string &game_path);
 
 // Bring LOVE up: build the Lua state, preload the modules, start the boot

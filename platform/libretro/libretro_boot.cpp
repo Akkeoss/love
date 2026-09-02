@@ -736,6 +736,14 @@ bool boot(const std::string &game_path)
 	// idle while LuaJIT spins. jitsetup.lua's own comment says exactly this
 	// ("both fail and take a long time"); it is simply far worse in a core.
 	//
+	// Two different errors are watched, and they are NOT the same problem:
+	// "failed to allocate mcode memory" is the jump-range story above, while
+	// "hit mcode limit (retrying)" only means the mcode area is full and
+	// LuaJIT wants to grow it past jit.opt's maxmcode -- a parameter, not an
+	// address-space shortage. Both stall the same way, so both trip the guard,
+	// but the report says which fired: they have different fixes, and this
+	// code used to name the jump-range one whatever had actually happened.
+	//
 	// So watch the trace events, and if mcode allocation keeps failing,
 	// switch the JIT off once and stop. Interpreted Lua is slower than
 	// compiled Lua, and much faster than a compiler that never succeeds.
@@ -767,16 +775,25 @@ bool boot(const std::string &game_path)
 		"if not ok or type(vmdef.traceerr) ~= 'table' then return 'no vmdef' end\n"
 		"local watch = {}\n"
 		"for i, msg in ipairs(vmdef.traceerr) do\n"
+		// The message itself, not just a flag: it is what tells the two causes
+		// apart afterwards (see `seen` below).
 		"  if msg == 'failed to allocate mcode memory'\n"
-		"     or msg == 'hit mcode limit (retrying)' then watch[i] = true end\n"
+		"     or msg == 'hit mcode limit (retrying)' then watch[i] = msg end\n"
 		"end\n"
 		"if not next(watch) then return 'no mcode errors in this build' end\n"
 		"local hits, tripped = 0, false\n"
 		"local firstfail = nil\n"
+		// Which of the two watched errors actually fired, counted separately.
+		// They have different causes and different fixes, and the guard used to
+		// report neither -- it announced the 128MB jump range whatever happened,
+		// which is a diagnosis it had no way of making. Kept per-message rather
+		// than as a single flag so a run that hits both says so.
+		"local seen = {}\n"
 		"jit.attach(function(what, tr, func, pc, otr, oex)\n"
 		"  if tripped or what ~= 'abort' then return end\n"
 		"  if watch[otr] then\n"
 		"    hits = hits + 1\n"
+		"    seen[watch[otr]] = (seen[watch[otr]] or 0) + 1\n"
 		"    if not firstfail and love and love.timer then firstfail = love.timer.getTime() end\n"
 		"    if hits >= 8 then\n"
 		"      tripped = true\n"
@@ -786,8 +803,10 @@ bool boot(const std::string &game_path)
 		"      if firstfail and love and love.timer then\n"
 		"        secs = love.timer.getTime() - firstfail\n"
 		"      end\n"
+		"      local why = {}\n"
+		"      for msg, n in pairs(seen) do why[#why+1] = msg .. ' x' .. n end\n"
 		"      if love and love._libretro_jit_gave_up then\n"
-		"        love._libretro_jit_gave_up(hits, secs)\n"
+		"        love._libretro_jit_gave_up(hits, secs, table.concat(why, ', '))\n"
 		"      end\n"
 		"    end\n"
 		"  end\n"
@@ -862,11 +881,29 @@ bool boot(const std::string &game_path)
 	lua_pushcfunction(L, [](lua_State *ls) -> int {
 		const int    hits = (int) luaL_optnumber(ls, 1, 0);
 		const double secs = (double) luaL_optnumber(ls, 2, 0.0);
+		const char  *why  = luaL_optstring(ls, 3, "(cause not reported)");
+
+		// Report WHICH error fired, because the two the guard watches have
+		// different causes and different fixes, and this message used to assert
+		// the jump-range one whatever had happened:
+		//
+		//   "failed to allocate mcode memory" -- LuaJIT could not find free
+		//   address space within +-128MB of its own VM. That is the structural
+		//   one: a core is dlopen'd after the frontend, Mesa and the audio
+		//   stack, so the window is often already taken.
+		//
+		//   "hit mcode limit (retrying)" -- the mcode area is FULL and LuaJIT
+		//   wants to grow it past jit.opt's maxmcode (512KB by default). That
+		//   has nothing to do with address space or with the size of this .so;
+		//   it is a parameter, and raising it is a one-line fix.
+		//
+		// Guessing between them sends the next person down the wrong path
+		// entirely -- 200 lines of address-space management for what may be a
+		// tuning knob.
 		log(RETRO_LOG_WARN,
-		    "[LOVE] LuaJIT could not place its machine code (%d failures over "
-		    "%.2fs) -- switching it off. This is the ARM 128MB jump-range limit; "
-		    "the core now runs interpreted, which is slower per operation but "
-		    "does not stall.\n", hits, secs);
+		    "[LOVE] LuaJIT gave up compiling (%d aborts over %.2fs: %s) -- "
+		    "switching it off. The core now runs interpreted, which is slower "
+		    "per operation but does not stall.\n", hits, secs, why);
 		return 0;
 	});
 	lua_setfield(L, -2, "_libretro_jit_gave_up");

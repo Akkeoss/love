@@ -44,11 +44,6 @@ double current_render_scale = 0.0;   // 0.0 = auto
 // before any game code runs.
 bool current_jit = true;
 
-// Whether to read the game's size from conf.lua before the frontend asks, which
-// removes the second boot. Off by default: it is known to break the picture on
-// a 15 kHz CRT (see the call site in retro_load_game), and that is not a
-// trade-off to make for a player without asking.
-
 // The pointer.
 //
 // Speed is in game pixels per frame at full stick deflection, and 0 means the
