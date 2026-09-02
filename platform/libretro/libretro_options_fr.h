@@ -22,8 +22,6 @@ namespace libretro {
 
 #define LOVE_FR_JIT_LABEL "LuaJIT (mettre off si des images se figent)"
 
-#define LOVE_FR_SINGLEBOOT_LABEL \
-	"Demarrage unique (plus rapide ; peut decaler l'image sur CRT)"
 
 #define LOVE_FR_CATEGORY_VIDEO_NAME "Affichage"
 #define LOVE_FR_CATEGORY_VIDEO_INFO \

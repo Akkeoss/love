@@ -533,47 +533,34 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 	// report state.fps to the frontend.
 	love::libretro::options_update(environ_cb);
 	apply_fps();
-
-	// Find out the game's real resolution BEFORE the frontend asks for it.
+	// Read the game's own size out of conf.lua before answering, so the answer is
+	// right the first time.
 	//
-	// This is the difference between the game booting once and booting twice.
 	// retro_get_system_av_info runs immediately after this and its answer is what
 	// the frontend allocates -- but LOVE has not booted (it cannot: no GL context
-	// until context_reset), so that answer used to be the 800x600 default. The
-	// first frame revealing the true size then forced a SET_SYSTEM_AV_INFO, which
-	// makes RetroArch rebuild the GL context and reboot LOVE from scratch. A
-	// player's log showed it plainly: "booted" and "loaded save" twice.
+	// until context_reset), so without this the answer is the 800x600 default.
+	// The first frame revealing the true size then forces a SET_SYSTEM_AV_INFO,
+	// which makes RetroArch rebuild the GL context and boot LOVE a second time:
+	// ~0.4s twice over, with every shader and texture built twice.
 	//
 	// The size is in conf.lua, plain Lua that runs long before any GL work
-	// (love.conf precedes love.window.setMode in boot.lua). A wrong guess costs
-	// exactly what the old behaviour cost; a right one saves an entire boot.
-	// Deliberately NOT called -- see the note on peek_game_size itself.
+	// (love.conf precedes love.window.setMode in boot.lua), so it can be read
+	// here. This is not a workaround for the second boot -- the second boot
+	// exists only because the first answer was wrong.
 	//
-	// Reading conf.lua up front removes the second boot, and it works. But on a
-	// 15 kHz CRT it breaks the picture: announcing the game's size before the
-	// frontend has a video mode means the geometry change that follows is a
-	// SET_GEOMETRY rather than a SET_SYSTEM_AV_INFO, and only the latter makes
-	// RetroArch rebuild the GL context -- which is what leaves KMS and the
-	// modeline agreeing with each other. Without it the launcher renders shifted
-	// down with a black band at the top, verified on real hardware both ways.
+	// This was optional and off for a long time, on the evidence that a 15 kHz
+	// CRT needed the rebuild to keep KMS and the modeline in agreement. That
+	// evidence was gathered while the probe was broken: it built the settings
+	// table without t.audio, so a conf.lua touching t.audio errored before
+	// reaching the size and the default was reported anyway. The display was
+	// handed a size the game did not want, and only the rebuild straightened it
+	// out. With the probe fixed the reported size is the game's own from the
+	// first call; checked on a real 15 kHz CRT with Mr. Rescue -- the game whose
+	// black band started this -- identical modeline, no offset.
 	//
-	// The modeline itself is identical in both cases (1024x488i, Y scale 0.635),
-	// which is why reading the log alone points at the wrong culprit. What
-	// differs is the context rebuild. So the double boot stays by default: ~0.4s
-	// of duplicated work at launch against a picture that is simply wrong.
-	//
-	// Behind an option rather than deleted, because the cost is not only that
-	// 0.4s: the second boot rebuilds every shader and reloads every texture the
-	// game had already built, which on a mod with a large asset set is the
-	// heaviest thing that happens at launch. A player on HDMI pays that for a
-	// CRT defect they will never see, and only they can tell whether their
-	// display is affected -- so it is theirs to switch on and look.
-	if (love::libretro::option_single_boot())
-	{
-		love::libretro::peek_game_size(game_path);
-		log_cb(RETRO_LOG_INFO, "[LOVE] single boot: game size read up front (%ux%u)\n",
-		       love::libretro::state.width, love::libretro::state.height);
-	}
+	// A game that declares no size (Balatro asks for 0x0) has nothing to read and
+	// still pays the old cost, which is what it paid before.
+	love::libretro::peek_game_size(game_path);
 
 	// LOVE itself is booted in context_reset, not here: there is no GL context
 	// yet, and love.graphics cannot come up without one.

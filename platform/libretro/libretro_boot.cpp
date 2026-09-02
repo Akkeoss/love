@@ -37,6 +37,8 @@ extern "C" {
 	#include <lauxlib.h>
 }
 
+#include <dirent.h>
+#include <string>
 #include <cstring>
 #include <cstdarg>
 #include <cstdio>
@@ -251,6 +253,249 @@ void run_quit_handler()
 
 } // anonymous namespace
 
+// The size the game should actually render at, given what it asked for.
+//
+// Shared, because TWO callers have to arrive at the same answer: the window
+// backend when the game calls setMode, and peek_game_size, which reports a size
+// to the frontend before LOVE has booted. If they disagree the frontend
+// allocates one size and is handed another, forcing the SET_SYSTEM_AV_INFO that
+// reboots LOVE -- which is the very thing peek_game_size exists to avoid.
+// Is the picture going to a 15kHz CRT?
+//
+// libretro has no environment call for the display, and the FBO the frontend
+// hands over says nothing about what shows it. But on Linux the display
+// describes itself through DRM, in plain text files, and that is neither
+// frontend- nor distribution-specific -- the same paths exist on any KMS
+// system.
+//
+// The discriminator is the tallest mode the screen advertises. A 15kHz CRT
+// tops out at 576 lines (288 progressive, 576 interlaced); anything with a
+// desktop or TV panel behind it offers 720 or more. Width is useless here:
+// a CRT setup lists 1920x288 and 1920x240 as "super resolution" modes, so a
+// test on width would call this an HD screen.
+//
+// Measured on the reporter's Pi 5, connector VGA-1:
+//   320x240  1920x288  1920x240  768x576i  1920x224  640x480i  384x288
+// tallest = 576 -> CRT. An HDMI monitor would list 1080 or 1440.
+//
+// Anything this cannot read -- no DRM, no connected output, a platform with
+// no sysfs -- answers false, and the caller then leaves the game's own size
+// alone. Being wrong in that direction costs nothing; being wrong the other
+// way would shrink a picture nobody asked to shrink.
+bool display_is_15khz()
+{
+	// Answered once: a screen is not swapped mid-session, and this sits on the
+	// path a game takes when it calls setMode.
+	static int cached = -1;
+	if (cached >= 0)
+		return cached != 0;
+
+	cached = 0;
+
+	DIR *d = opendir("/sys/class/drm");
+	if (d == nullptr)
+	{
+		log(RETRO_LOG_INFO, "[LOVE] display: no DRM to ask, leaving sizes alone\n");
+		return false;
+	}
+
+	int tallest = 0;
+
+	while (struct dirent *e = readdir(d))
+	{
+		// Connector directories are "cardN-<OUTPUT>"; skip ".", "..", "version"
+		// and the cardN device nodes themselves.
+		if (std::strncmp(e->d_name, "card", 4) != 0 || std::strchr(e->d_name, '-') == nullptr)
+			continue;
+
+		std::string base = std::string("/sys/class/drm/") + e->d_name;
+
+		// Only a connected output describes the screen in front of the player.
+		char status[32] = {0};
+		if (FILE *f = std::fopen((base + "/status").c_str(), "rb"))
+		{
+			const size_t n = std::fread(status, 1, sizeof(status) - 1, f);
+			std::fclose(f);
+			if (n == 0 || std::strncmp(status, "connected", 9) != 0)
+				continue;
+		}
+		else
+			continue;
+
+		FILE *f = std::fopen((base + "/modes").c_str(), "rb");
+		if (f == nullptr)
+			continue;
+
+		char line[64];
+		while (std::fgets(line, sizeof(line), f) != nullptr)
+		{
+			// "1920x288", "640x480i" -- the height is what matters, and the
+			// trailing 'i' on an interlaced mode is not part of it.
+			const char *x = std::strchr(line, 'x');
+			if (x == nullptr)
+				continue;
+
+			const int h = std::atoi(x + 1);
+			if (h > tallest)
+				tallest = h;
+		}
+		std::fclose(f);
+	}
+	closedir(d);
+
+	// 576 is the tallest a 15kHz CRT reaches. Give it a little room rather than
+	// testing equality: some setups advertise a 600-line mode.
+	if (tallest > 0 && tallest <= 600)
+		cached = 1;
+
+	log(RETRO_LOG_INFO, "[LOVE] display: tallest mode %d lines -- %s\n",
+	    tallest, cached ? "15kHz CRT, fitting sizes to it"
+	                    : "not a 15kHz CRT, leaving sizes alone");
+
+	return cached != 0;
+}
+
+void scale_to_display(int &w, int &h)
+{
+	if (w <= 0 || h <= 0)
+		return;
+
+	// The size the game asks for is not necessarily a size the display can
+	// show, and on a 15kHz CRT that matters: a size with no mode of its own
+	// gets a synthesised modeline, and the picture comes out soft. The
+	// standard modes come in two families that are NOT interchangeable --
+	// 320x240 / 512x384 / 640x480 run at 60Hz, 384x288 / 512x384 / 768x576
+	// at 50Hz. Landing a 60Hz core on a 50Hz mode makes the frontend
+	// resample the audio across the mismatch, which is audible.
+	//
+	// So the mode list is chosen by the fps the core announces, and a
+	// player who sets fps=50 gets the PAL sizes, which is then right for
+	// them.
+	struct CRTMode { int w, h; };
+	static const CRTMode NTSC_MODES[] = { { 320, 240 }, { 512, 384 }, { 640, 480 } };
+	static const CRTMode PAL_MODES[]  = { { 384, 288 }, { 512, 384 }, { 768, 576 } };
+
+	const bool pal = love::libretro::state.fps < 55.0;
+	const CRTMode *MODES = pal ? PAL_MODES : NTSC_MODES;
+	const int NUM_MODES = 3;
+
+	const double scale = love::libretro::state.render_scale;
+
+	if (scale <= 0.0)
+	{
+		// AUTO: fit a standard display mode, but only when the picture is
+		// actually going to a 15kHz CRT.
+		//
+		// Fitting a mode is what makes a CRT sharp: a size it has no mode for
+		// gets a synthesised modeline and a soft picture. On an HD screen it is
+		// the opposite -- the frontend upscales either way, so shrinking
+		// 1024x768 to 640x480 only magnifies the same image more coarsely, for
+		// no gain anyone asked for.
+		if (!display_is_15khz())
+			return;
+
+		// Drop to the largest standard mode that FITS inside what the game asked
+		// for, and do nothing when none does.
+		//
+		// A percentage cannot be right for every game, because it is applied
+		// to whatever the game happens to want: 66% suits a 1024x768 game and
+		// takes a 320x240 one down to 210x158, which is worse than leaving it
+		// alone. The player then has to retune the setting per game, or accept
+		// that one of their games looks wrong.
+		//
+		// Fitting a standard mode instead is safe in both directions: a game
+		// already at or below one keeps its size, and a larger one lands on a
+		// size the display actually has. On a CRT that is the difference
+		// between a native mode and a synthesised one; on HDMI the frontend
+		// scales either way, so it costs nothing there and saves the GPU real
+		// work.
+		//
+		// The aspect has to match within 2%, or a 16:9 game would be squeezed
+		// into 4:3. Those keep their own size.
+		const double aspect = (double) w / (double) h;
+
+		int bestw = 0, besth = 0;
+
+		for (int i = 0; i < NUM_MODES; i++)
+		{
+			const CRTMode &m = MODES[i];
+
+			if (m.w > w || m.h > h)
+				continue;
+
+			// The shape has to match closely -- 2%, not more.
+			//
+			// Widening this to 8% was tried, to pull Mr. Rescue's 768x600 (1.28,
+			// 4% off 4:3) onto the native 640x480 rather than let crtswitchres
+			// synthesise a 768x488 and squeeze it. The log looked ideal: native
+			// modeline, no "Resolution is stretched", aspect exactly 1.333.
+			//
+			// On the screen it was much worse -- a massive zoom showing one
+			// corner of the game. The reason is that a LOVE game lays itself out
+			// for the size it is given: handed 640x480 it draws its 768x600
+			// design into that frame and the frontend then scales the result up
+			// to fill the display. Changing the shape does not reframe the game,
+			// it crops it.
+			//
+			// So only a size the game can take without being re-laid-out is
+			// worth fitting. The log cannot see this; only the screen can.
+			if (std::abs((double) m.w / (double) m.h - aspect) > 0.02)
+				continue;
+
+			if (m.w > bestw)
+			{
+				bestw = m.w;
+				besth = m.h;
+			}
+		}
+
+		if (bestw > 0)
+		{
+			w = bestw;
+			h = besth;
+		}
+	}
+	else if (scale < 1.0)
+	{
+		// An explicit percentage: the player is asking for less GPU work, so
+		// honour the number, then round to a standard mode when the result
+		// lands near one. Kept even so pixel-doubling games stay on integer
+		// boundaries.
+		w = ((int) (w * scale)) & ~1;
+		h = ((int) (h * scale)) & ~1;
+		if (w < 2) w = 2;
+		if (h < 2) h = 2;
+
+		// "Near" is 12%: enough to catch 674x506 -> 640x480 (5%), not enough
+		// to turn a deliberate 512x384 into 640x480 (25%). Both axes have to
+		// be close, or a mode of the wrong shape would stretch the picture.
+		int bestw = 0, besth = 0;
+		double bestdist = 0.12;
+
+		for (int i = 0; i < NUM_MODES; i++)
+		{
+			const CRTMode &m = MODES[i];
+
+			const double dw = std::abs((double) m.w - w) / (double) w;
+			const double dh = std::abs((double) m.h - h) / (double) h;
+			const double dist = dw > dh ? dw : dh;
+
+			if (dist < bestdist)
+			{
+				bestdist = dist;
+				bestw = m.w;
+				besth = m.h;
+			}
+		}
+
+		if (bestw > 0)
+		{
+			w = bestw;
+			h = besth;
+		}
+	}
+}
+
 bool is_running()
 {
 	return running && boot_co != nullptr;
@@ -352,11 +597,19 @@ void peek_game_size(const std::string &game_path)
 			// reference to read back afterwards, and pass the other to the call.
 			// Stack order matters: pcall consumes the function and its argument, so
 			// the copy that survives has to sit BELOW them.
+			// The three sub-tables LOVE's own default conf provides (see
+			// boot.lua). All three, not just the one we read: love.conf writes
+			// into whichever it likes, and indexing a missing one is an error
+			// that aborts the chunk before it reaches the size. Mr. Rescue does
+			// exactly that with t.audio.mixwithsystem -- it declares 768x600 and
+			// the probe reported the 800x600 default instead, silently.
 			lua_newtable(cl);              // t (the one we keep)
 			lua_newtable(cl);              // t.window
 			lua_setfield(cl, -2, "window");
-			lua_newtable(cl);              // t.modules -- commonly written to
+			lua_newtable(cl);              // t.modules
 			lua_setfield(cl, -2, "modules");
+			lua_newtable(cl);              // t.audio
+			lua_setfield(cl, -2, "audio");
 			lua_insert(cl, -2);            // ... t, conf
 			lua_pushvalue(cl, -2);         // ... t, conf, t
 
@@ -376,18 +629,13 @@ void peek_game_size(const std::string &game_path)
 					// frontend cannot allocate would be worse than guessing wrong.
 					if (w >= 64 && h >= 64 && w <= 8192 && h <= 8192)
 					{
-						// Apply the player's render scale here too, or the frontend
-						// would be told one size and handed another the moment
-						// love.window.setMode runs -- which is the very reallocation
-						// this is here to avoid. Same rounding as Window::setWindow.
-						double scale = state.render_scale;
-						if (scale > 0.0 && scale < 1.0)
-						{
-							w = ((int) (w * scale)) & ~1;
-							h = ((int) (h * scale)) & ~1;
-							if (w < 2) w = 2;
-							if (h < 2) h = 2;
-						}
+						// Size it exactly as the window backend will. One
+						// function for both, so the two cannot drift apart --
+						// they did: Auto arrived in the window backend only, so
+						// this reported 1024x768 while setMode produced 640x480,
+						// and the mismatch forced the reallocation that single
+						// boot is supposed to remove.
+						scale_to_display(w, h);
 
 						state.width  = (unsigned) w;
 						state.height = (unsigned) h;
@@ -503,6 +751,17 @@ bool boot(const std::string &game_path)
 	// a bytecode number, while traceerr ends at 31 -- so the guard never
 	// fired and the protection was dead code. Verified directly: a pcall in
 	// a hot loop reports otr=7 ('NYI: bytecode %s'), oex=51.
+	// The threshold is 8, not 32.
+	//
+	// Each failure is a compile attempt that ran and then could not place its
+	// output, so the cost is paid before the guard can see it -- a high threshold
+	// means paying it 32 times. On a Pi 5 the first freeze after a zone change
+	// measured 4527ms with update() at 4308ms, and the guard did not trip until
+	// seven frames later: the compiler was spinning for the whole of it.
+	//
+	// 8 is still far above what a healthy run produces (a board where mcode
+	// allocation works reports zero of these), so a game that would have
+	// compiled fine is not cut off early.
 	static const char *JIT_GUARD =
 		"local ok, vmdef = pcall(require, 'jit.vmdef')\n"
 		"if not ok or type(vmdef.traceerr) ~= 'table' then return 'no vmdef' end\n"
@@ -513,16 +772,22 @@ bool boot(const std::string &game_path)
 		"end\n"
 		"if not next(watch) then return 'no mcode errors in this build' end\n"
 		"local hits, tripped = 0, false\n"
+		"local firstfail = nil\n"
 		"jit.attach(function(what, tr, func, pc, otr, oex)\n"
 		"  if tripped or what ~= 'abort' then return end\n"
 		"  if watch[otr] then\n"
 		"    hits = hits + 1\n"
-		"    if hits >= 32 then\n"
+		"    if not firstfail and love and love.timer then firstfail = love.timer.getTime() end\n"
+		"    if hits >= 8 then\n"
 		"      tripped = true\n"
 		"      pcall(jit.off)\n"
 		"      pcall(jit.flush)\n"
+		"      local secs = 0\n"
+		"      if firstfail and love and love.timer then\n"
+		"        secs = love.timer.getTime() - firstfail\n"
+		"      end\n"
 		"      if love and love._libretro_jit_gave_up then\n"
-		"        love._libretro_jit_gave_up(hits)\n"
+		"        love._libretro_jit_gave_up(hits, secs)\n"
 		"      end\n"
 		"    end\n"
 		"  end\n"
@@ -595,12 +860,13 @@ bool boot(const std::string &game_path)
 	// "the game stutters" into a named cause -- and because a player seeing it
 	// should know the core is now running interpreted on purpose.
 	lua_pushcfunction(L, [](lua_State *ls) -> int {
-		const int hits = (int) luaL_optnumber(ls, 1, 0);
+		const int    hits = (int) luaL_optnumber(ls, 1, 0);
+		const double secs = (double) luaL_optnumber(ls, 2, 0.0);
 		log(RETRO_LOG_WARN,
-		    "[LOVE] LuaJIT could not place its machine code (%d failures) -- "
-		    "switching it off. This is the ARM 128MB jump-range limit; the core "
-		    "now runs interpreted, which is slower per operation but does not "
-		    "stall.\n", hits);
+		    "[LOVE] LuaJIT could not place its machine code (%d failures over "
+		    "%.2fs) -- switching it off. This is the ARM 128MB jump-range limit; "
+		    "the core now runs interpreted, which is slower per operation but "
+		    "does not stall.\n", hits, secs);
 		return 0;
 	});
 	lua_setfield(L, -2, "_libretro_jit_gave_up");

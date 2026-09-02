@@ -175,6 +175,16 @@ bool boot(const std::string &game_path);
 bool run_frame();
 
 // True between a successful boot() and the frame LOVE quits on.
+// The size the game should actually render at, given what it asked for and the
+// player's render-scale setting.
+//
+// Shared because TWO places have to agree on it: the window backend, when the
+// game calls setMode, and peek_game_size, which reports a size to the frontend
+// before LOVE has booted. If they disagree the frontend allocates one size and
+// is handed another, which forces the SET_SYSTEM_AV_INFO that reboots LOVE --
+// exactly the double boot peek_game_size exists to avoid.
+void scale_to_display(int &w, int &h);
+
 bool is_running();
 
 // Close the Lua state. Safe to call when not running.

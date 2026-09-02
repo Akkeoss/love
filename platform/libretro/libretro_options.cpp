@@ -48,7 +48,6 @@ bool current_jit = true;
 // removes the second boot. Off by default: it is known to break the picture on
 // a 15 kHz CRT (see the call site in retro_load_game), and that is not a
 // trade-off to make for a player without asking.
-bool current_single_boot = false;
 
 // The pointer.
 //
@@ -128,7 +127,6 @@ void build_options_v2(retro_core_option_v2_category *cats,
                       const char *timing_cat_info,
                       const char *fps_label,
                       const char *jit_label,
-                      const char *singleboot_label,
                       const char *video_cat_name,
                       const char *video_cat_info,
                       const char *scale_label,
@@ -175,30 +173,6 @@ void build_options_v2(retro_core_option_v2_category *cats,
 	defs[d].values[1] = { "off", "off" };
 	defs[d].values[2] = { nullptr, nullptr };
 	defs[d].default_value = "on";
-	d++;
-
-	// Single boot.
-	//
-	// The core boots the game, learns its real resolution, and corrects it
-	// through SET_SYSTEM_AV_INFO -- which makes the frontend rebuild the GL
-	// context, so the game boots a second time. That costs roughly 0.4s twice
-	// over, and every shader and texture the game loaded is built twice.
-	//
-	// Reading conf.lua up front avoids it, and works. It is off by default
-	// because on a 15 kHz CRT the context rebuild is also what keeps KMS and the
-	// modeline in agreement: without it the picture sits shifted with a black
-	// band at the top. HDMI does not show that, which is exactly why this is a
-	// choice rather than a default.
-	defs[d].key              = "love_single_boot";
-	defs[d].desc             = singleboot_label;
-	defs[d].desc_categorized = singleboot_label;
-	defs[d].info             = nullptr;
-	defs[d].info_categorized = nullptr;
-	defs[d].category_key     = VIDEO_CATEGORY_KEY;
-	defs[d].values[0] = { "off", "off" };
-	defs[d].values[1] = { "on",  "on"  };
-	defs[d].values[2] = { nullptr, nullptr };
-	defs[d].default_value = "off";
 	d++;
 
 	// The fps option.
@@ -312,7 +286,6 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 "to match a 50 Hz display.",
 		                 "Frames per second",
 		                 "LuaJIT (turn off if frames stall on your board)",
-		                 "Single boot (faster start; may shift the picture on a CRT)",
 		                 "Video",
 		                 "Rendering. Lowering the render scale makes a heavy 3D "
 		                 "game much cheaper to draw, at the cost of sharpness.",
@@ -328,7 +301,6 @@ bool set_options_v2(retro_environment_t environ_cb)
 		                 LOVE_FR_CATEGORY_TIMING_INFO,
 		                 LOVE_FR_FPS_LABEL,
 		                 LOVE_FR_JIT_LABEL,
-		                 LOVE_FR_SINGLEBOOT_LABEL,
 		                 LOVE_FR_CATEGORY_VIDEO_NAME,
 		                 LOVE_FR_CATEGORY_VIDEO_INFO,
 		                 LOVE_FR_SCALE_LABEL,
@@ -368,17 +340,14 @@ void set_options_v1(retro_environment_t environ_cb)
 	vars[2].key   = "love_jit";
 	vars[2].value = "LuaJIT; on|off";
 
-	vars[3].key   = "love_single_boot";
-	vars[3].value = "Single boot; off|on";
+	vars[3].key   = "love_pointer_speed";
+	vars[3].value = "Pointer speed (left stick); 0|12|6|20";
 
-	vars[4].key   = "love_pointer_speed";
-	vars[4].value = "Pointer speed (left stick); 0|12|6|20";
+	vars[4].key   = "love_pointer_click";
+	vars[4].value = "Pointer click button; b|a|y|x|l|r|none";
 
-	vars[5].key   = "love_pointer_click";
-	vars[5].value = "Pointer click button; b|a|y|x|l|r|none";
-
-	vars[6].key   = nullptr;
-	vars[6].value = nullptr;
+	vars[5].key   = nullptr;
+	vars[5].value = nullptr;
 
 	environ_cb(RETRO_ENVIRONMENT_SET_VARIABLES, vars);
 }
@@ -421,13 +390,6 @@ void options_update(retro_environment_t environ_cb)
 		current_jit = true;
 
 	// Single boot.
-	retro_variable sb_var;
-	sb_var.key   = "love_single_boot";
-	sb_var.value = nullptr;
-	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &sb_var) && sb_var.value != nullptr)
-		current_single_boot = std::strcmp(sb_var.value, "on") == 0;
-	else
-		current_single_boot = false;
 
 	// Render scale: "auto", or a percentage from "100" down to "25".
 	//
@@ -486,10 +448,6 @@ unsigned option_pointer_click_button()
 	return current_pointer_click;
 }
 
-bool option_single_boot()
-{
-	return current_single_boot;
-}
 
 double option_fps()
 {
