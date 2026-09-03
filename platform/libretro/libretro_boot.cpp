@@ -39,6 +39,10 @@ extern "C" {
 
 #include <dirent.h>
 #include <string>
+#include <sys/stat.h>
+#include <cmath>
+#include <vector>
+#include <utility>
 #include <cstring>
 #include <cstdarg>
 #include <cstdio>
@@ -501,10 +505,228 @@ bool is_running()
 	return running && boot_co != nullptr;
 }
 
+// Where the last known size for a game is remembered.
+//
+// A .love whose final size is NOT the one in conf.lua cannot be answered from
+// a static read: Bugscraper declares 960x540 and then calls setMode with a
+// value out of its own options file, which the probe cannot execute (the game
+// touches love.graphics before it ever calls setMode). Guessing is not an
+// option either -- the wrong answer costs a reboot, which is the very thing
+// being avoided.
+//
+// So the size is not predicted, it is REMEMBERED. The first run of a game still
+// pays the resize; every run after it opens at the size that game actually
+// settled on, and pays none. This needs no knowledge of any game.
+//
+// One small file per game, keyed by the .love's file name, next to the saves
+// the frontend already owns.
+// The game's save folder name, derived exactly as boot.lua derives it.
+//
+// LOVE uses t.identity when conf.lua sets one, and otherwise falls back to the
+// .love's own file name put through three rules (boot.lua lines 107-110): strip
+// leading dots, strip the extension, turn remaining dots into underscores.
+// Balatro is the case that needs the fallback -- it declares no identity at all.
+//
+// Filled by peek_game_size while it has conf.lua open; empty until then, which
+// is why the memo path falls back to the save directory itself.
+std::string game_identity;
+
+std::string identity_from_filename(const std::string &game_path)
+{
+	std::string name = game_path;
+	const size_t slash = name.find_last_of("/\\");
+	if (slash != std::string::npos)
+		name = name.substr(slash + 1);
+
+	size_t first = name.find_first_not_of('.');
+	name = (first == std::string::npos) ? "" : name.substr(first);
+
+	const size_t dot = name.find_last_of('.');
+	if (dot != std::string::npos)
+		name = name.substr(0, dot);
+
+	for (char &c : name)
+		if (c == '.')
+			c = '_';
+
+	return name.empty() ? "lovegame" : name;
+}
+
+std::string size_memo_path(const std::string &game_path)
+{
+	if (game_path.empty() || state.save_dir.empty())
+		return "";
+
+	// The file name alone, not the full path: a player moving their roms should
+	// not lose the memo, and a path with separators in it cannot be a filename.
+	std::string name = game_path;
+	const size_t slash = name.find_last_of("/\\");
+	if (slash != std::string::npos)
+		name = name.substr(slash + 1);
+	if (name.empty())
+		return "";
+
+	// Inside the game's own save folder when we know it, so the memo sits with
+	// that game's saves instead of littering the shared save directory. The
+	// folder is LOVE's to create, and it may not exist yet on a first run --
+	// mkdir here rather than give up, since the same path is about to be used
+	// for the saves anyway.
+	if (!game_identity.empty())
+	{
+		// The same path LOVE will use for this game's saves, which is NOT
+		// save_dir + identity: LOVE appends its own "love" component below the
+		// appdata directory it is given, and the core hands it the PARENT of the
+		// save directory precisely so that component lands on the frontend's own
+		// "love" folder (see retro_set_environment). Reproducing only half of
+		// that put the memo in a sibling folder next to the saves rather than
+		// with them.
+		const size_t slash = state.save_dir.find_last_of('/');
+		const bool ends_in_love =
+			slash != std::string::npos
+			&& state.save_dir.compare(slash + 1, std::string::npos, "love") == 0;
+		const std::string base =
+			ends_in_love ? state.save_dir : state.save_dir + "/love";
+
+		return base + "/" + game_identity + "/love_size.txt";
+	}
+
+	return state.save_dir + "/love_size_" + name + ".txt";
+}
+
+// Best-effort both ways: a missing or unreadable memo simply means "no memory
+// of this game", which is where every game starts.
+bool read_size_memo(const std::string &game_path, unsigned &w, unsigned &h)
+{
+	const std::string path = size_memo_path(game_path);
+	if (path.empty())
+		return false;
+
+	FILE *f = fopen(path.c_str(), "r");
+	if (!f)
+		return false;
+
+	// One line per settings combination: "<scale> <fps> <w> <h>". A player who
+	// uses two render scales keeps a usable memo for both, instead of the second
+	// overwriting the first and costing a reallocation on every switch.
+	//
+	// The settings are matched from the CONTENTS rather than being folded into
+	// the filename, which was tried and is worse: the fps and scale a run starts
+	// with are not always the ones it ends with (the frontend can deliver its
+	// options late, and the fallback value differs from the compiled default), so
+	// a name built from them can be written under one key and looked up under
+	// another -- a memo that is never found again. Comparing here is tolerant of
+	// that; a name cannot be.
+	bool found = false;
+	char line[128];
+	while (fgets(line, sizeof(line), f))
+	{
+		double ls = 0.0, lf = 0.0;
+		unsigned lw = 0, lh = 0;
+		if (sscanf(line, "%lf %lf %u %u", &ls, &lf, &lw, &lh) != 4)
+			continue;
+
+		// Compare fps by the only thing about it that changes the answer: which
+		// family of CRT modes scale_to_display fits to, split at 55Hz. An exact
+		// match is wrong here -- 60.0988 and 60.0 are the same choice as far as
+		// the size is concerned, and the two do get mixed within one game's runs
+		// (the fps fallback is 60.0 while the default is 60.0988), which made a
+		// strict test reject a memo the game had just written.
+		if (std::abs(ls - state.render_scale) > 0.001
+		    || (lf < 55.0) != (state.fps < 55.0))
+			continue;
+
+		// Same sanity bounds the conf.lua path uses: a stale or corrupted memo
+		// must not ask the frontend for a framebuffer it cannot allocate.
+		if (lw < 64 || lh < 64 || lw > 8192 || lh > 8192)
+			continue;
+
+		w = lw;
+		h = lh;
+		found = true;
+		break;
+	}
+
+	fclose(f);
+	return found;
+}
+
+void write_size_memo(const std::string &game_path, unsigned w, unsigned h)
+{
+	const std::string path = size_memo_path(game_path);
+	if (path.empty() || w < 64 || h < 64 || w > 8192 || h > 8192)
+		return;
+
+	// Keep the lines for other settings and replace only this one, so a memo
+	// stays useful for every combination the player has run.
+	std::vector<std::string> keep;
+	if (FILE *in = fopen(path.c_str(), "r"))
+	{
+		char line[128];
+		while (fgets(line, sizeof(line), in) && keep.size() < 16)
+		{
+			double ls = 0.0, lf = 0.0;
+			unsigned lw = 0, lh = 0;
+			if (sscanf(line, "%lf %lf %u %u", &ls, &lf, &lw, &lh) != 4)
+				continue;
+			if (std::abs(ls - state.render_scale) <= 0.001
+			    && (lf < 55.0) == (state.fps < 55.0))
+				continue;   // this is the line being replaced
+			keep.push_back(line);
+		}
+		fclose(in);
+	}
+
+	// Create the folder only now. Computing the path must not have side effects:
+	// every game asks for it on startup, and most never write a memo -- making
+	// an empty folder for each of them would be noise in the player's saves.
+	const size_t dirend = path.find_last_of('/');
+	if (dirend != std::string::npos)
+	{
+		const std::string dir = path.substr(0, dirend);
+		const size_t parent = dir.find_last_of('/');
+		if (parent != std::string::npos)
+			mkdir(dir.substr(0, parent).c_str(), 0755);
+		mkdir(dir.c_str(), 0755);
+	}
+
+	FILE *f = fopen(path.c_str(), "w");
+	if (!f)
+		return;
+	for (const std::string &l : keep)
+		fputs(l.c_str(), f);
+	fprintf(f, "%.6f %.6f %u %u\n", state.render_scale, state.fps, w, h);
+	fclose(f);
+}
+
 void peek_game_size(const std::string &game_path)
 {
 	if (game_path.empty())
 		return;   // nogame screen: the defaults are the answer
+
+	// The filename fallback is known before anything is read, so the memo has a
+	// home even for a game whose conf.lua cannot be parsed. A t.identity found
+	// further down replaces it -- and the memo is read again at that point,
+	// because the first attempt looked in the wrong folder.
+	game_identity = identity_from_filename(game_path);
+
+	// What this game settled on last time wins over what conf.lua declares.
+	//
+	// conf.lua is a statement of intent; the memo is an observation. When they
+	// disagree the game changed its mind at runtime, and the memo is the size it
+	// changed to -- announcing that one means no SET_SYSTEM_AV_INFO, so no
+	// context rebuild and no second boot.
+	{
+		unsigned mw = 0, mh = 0;
+		if (read_size_memo(game_path, mw, mh))
+		{
+			state.width  = mw;
+			state.height = mh;
+			log(RETRO_LOG_INFO,
+				"[LOVE] remembered size %ux%u from the last run -- reporting it up front\n",
+				mw, mh);
+			return;
+		}
+	}
 
 	// PhysFS is the only thing here that knows how to look inside a .love, and a
 	// .love is just a zip. It is not initialised yet (boot() does that later), so
@@ -522,23 +744,54 @@ void peek_game_size(const std::string &game_path)
 	if (!PHYSFS_init("love"))
 		return;
 
+	// A conf.lua is a few kilobytes; anything huge is not one, and reading an
+	// arbitrary amount here would be careless.
+	auto read_small = [](const char *name) -> std::string
+	{
+		std::string out;
+		PHYSFS_File *f = PHYSFS_openRead(name);
+		if (!f)
+			return out;
+		PHYSFS_sint64 len = PHYSFS_fileLength(f);
+		if (len > 0 && len < 1024 * 1024)
+		{
+			out.resize((size_t) len);
+			if (PHYSFS_readBytes(f, &out[0], (PHYSFS_uint64) len) != len)
+				out.clear();
+		}
+		PHYSFS_close(f);
+		return out;
+	};
+
 	std::string conf;
+	// A conf.lua may `require` a sibling module before it sets a size -- a game
+	// keeping its version string next to its window size is enough. That require
+	// has to resolve against the .love, which the scratch state below cannot
+	// reach: PhysFS is down by then, and Lua's own searchers only see the real
+	// filesystem. So collect the archive's top-level .lua files while the mount
+	// is still up, and let the searcher installed further down serve them from
+	// memory. Top level only: that is where conf.lua's own siblings live, and it
+	// keeps this to a bounded handful of small files.
+	std::vector<std::pair<std::string, std::string>> modules;
 	if (PHYSFS_mount(game_path.c_str(), nullptr, 1) != 0)
 	{
-		PHYSFS_File *f = PHYSFS_openRead("conf.lua");
-		if (f)
+		conf = read_small("conf.lua");
+
+		char **list = PHYSFS_enumerateFiles("");
+		if (list)
 		{
-			PHYSFS_sint64 len = PHYSFS_fileLength(f);
-			// A conf.lua is a few kilobytes; anything huge is not one, and reading
-			// an arbitrary amount here would be careless.
-			if (len > 0 && len < 1024 * 1024)
+			for (char **it = list; *it != nullptr; ++it)
 			{
-				conf.resize((size_t) len);
-				PHYSFS_sint64 got = PHYSFS_readBytes(f, &conf[0], (PHYSFS_uint64) len);
-				if (got != len)
-					conf.clear();
+				std::string name(*it);
+				if (name.size() < 5 || name.compare(name.size() - 4, 4, ".lua") != 0)
+					continue;
+				if (name == "conf.lua" || name == "main.lua")
+					continue;
+				std::string body = read_small(name.c_str());
+				if (!body.empty())
+					modules.emplace_back(name.substr(0, name.size() - 4), std::move(body));
 			}
-			PHYSFS_close(f);
+			PHYSFS_freeList(list);
 		}
 	}
 	PHYSFS_deinit();
@@ -582,6 +835,33 @@ void peek_game_size(const std::string &game_path)
 
 	lua_setglobal(cl, "love");
 
+	// Serve `require` from the modules collected above. They go into
+	// package.preload, which Lua's first searcher consults before it ever touches
+	// the filesystem -- so a require resolves here without this throwaway pass
+	// being able to read anything outside the .love. A module that itself fails
+	// to run is left to the pcall below, exactly like a conf.lua that errors.
+	if (!modules.empty())
+	{
+		lua_getglobal(cl, "package");
+		if (lua_istable(cl, -1))
+		{
+			lua_getfield(cl, -1, "preload");
+			if (lua_istable(cl, -1))
+			{
+				for (const auto &m : modules)
+				{
+					std::string chunkname = "@" + m.first + ".lua";
+					if (luaL_loadbuffer(cl, m.second.c_str(), m.second.size(), chunkname.c_str()) == 0)
+						lua_setfield(cl, -2, m.first.c_str());
+					else
+						lua_pop(cl, 1);   // a module that will not even compile is simply absent
+				}
+			}
+			lua_pop(cl, 1);   // preload
+		}
+		lua_pop(cl, 1);   // package
+	}
+
 	// Everything below is best-effort: a conf.lua that errors, expects modules we
 	// have not provided, or simply does not set a size leaves the defaults alone.
 	// That is the same outcome as not doing this at all, which is why none of it
@@ -615,6 +895,35 @@ void peek_game_size(const std::string &game_path)
 
 			if (lua_pcall(cl, 1, 0, 0) == 0)
 			{
+				// t.identity decides the save folder, so it decides where the memo
+				// lives. Read it before the size: if it differs from the filename
+				// guess made earlier, the memo read at the top of this function
+				// looked in the wrong folder and has to be retried here.
+				lua_getfield(cl, -1, "identity");
+				if (lua_isstring(cl, -1))
+				{
+					const std::string id = lua_tostring(cl, -1);
+					if (!id.empty() && id != game_identity)
+					{
+						game_identity = id;
+
+						unsigned mw = 0, mh = 0;
+						if (read_size_memo(game_path, mw, mh))
+						{
+							state.width  = mw;
+							state.height = mh;
+							log(RETRO_LOG_INFO,
+								"[LOVE] remembered size %ux%u from the last run -- reporting it up front\n",
+								mw, mh);
+							// No unwinding: lua_close frees the whole scratch state,
+							// stack and all.
+							lua_close(cl);
+							return;
+						}
+					}
+				}
+				lua_pop(cl, 1);   // identity
+
 				lua_getfield(cl, -1, "window");
 				if (lua_istable(cl, -1))
 				{

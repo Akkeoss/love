@@ -171,6 +171,11 @@ extern State state;
 // whose black band started the whole affair: identical modeline, no offset.
 void peek_game_size(const std::string &game_path);
 
+// Remember the size a game actually settled on, so the next run can be answered
+// with it directly. See size_memo_path in libretro_boot.cpp for why a game whose
+// size is decided at runtime cannot be answered any other way.
+void write_size_memo(const std::string &game_path, unsigned w, unsigned h);
+
 // Bring LOVE up: build the Lua state, preload the modules, start the boot
 // coroutine. Must be called with a live GL context. Returns false if LOVE
 // failed to start.

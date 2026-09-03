@@ -188,6 +188,72 @@ void reset_frame_step()
 	love::libretro::state.dt = 1.0 / love::libretro::state.fps;
 }
 
+// The frontend's view of our geometry, and the only place that changes it.
+//
+// The framebuffer is sized to the game exactly -- an oversized one
+// gives crtswitchres the wrong modeline and pushes the picture off-centre on a
+// 15 kHz CRT -- so a size that does not match the allocation pays a
+// SET_SYSTEM_AV_INFO, and anything else is a free re-crop with SET_GEOMETRY.
+unsigned last_w = 0, last_h = 0;   // what the frontend was last told
+unsigned fbo_w  = 0, fbo_h  = 0;   // what it has allocated
+
+// Set while a boot is in progress if the game changed size; see context_reset.
+bool size_changed_during_boot = false;
+
+void note_size_change()
+{
+	size_changed_during_boot = true;
+}
+
+void publish_geometry()
+{
+	const unsigned w = love::libretro::state.width;
+	const unsigned h = love::libretro::state.height;
+
+	if (w == 0 || h == 0 || (w == last_w && h == last_h))
+		return;
+
+	const bool needs_fbo_resize = (w != fbo_w || h != fbo_h);
+
+	struct retro_game_geometry geom;
+	std::memset(&geom, 0, sizeof(geom));
+	geom.base_width   = w;
+	geom.base_height  = h;
+	geom.max_width    = needs_fbo_resize ? w : fbo_w;
+	geom.max_height   = needs_fbo_resize ? h : fbo_h;
+	geom.aspect_ratio = (float) w / (float) h;
+
+	if (needs_fbo_resize)
+	{
+		struct retro_system_av_info av;
+		std::memset(&av, 0, sizeof(av));
+		av.geometry           = geom;
+		av.timing.fps         = love::libretro::state.fps;
+		av.timing.sample_rate = love::libretro::SAMPLE_RATE;
+
+		environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+
+		fbo_w = w;
+		fbo_h = h;
+		log_cb(RETRO_LOG_INFO, "[LOVE] geometry: %ux%u (fbo resized)\n", w, h);
+
+		// Remember it, so the next run of this game opens at this size and pays
+		// no reallocation at all. This is the only branch worth remembering:
+		// reaching it means the size we announced was not the one the game
+		// wanted, which is exactly the mistake the memo exists to stop repeating.
+		love::libretro::write_size_memo(game_path, w, h);
+	}
+	else
+	{
+		environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+		log_cb(RETRO_LOG_INFO, "[LOVE] geometry: %ux%u (within %ux%u)\n",
+		       w, h, fbo_w, fbo_h);
+	}
+
+	last_w = w;
+	last_h = h;
+}
+
 void context_reset()
 {
 	log_cb(RETRO_LOG_INFO, "[LOVE] context_reset: GL context is live\n");
@@ -200,6 +266,9 @@ void context_reset()
 	// boot, and there is no context to initialise against until this point.
 	// A frontend may also reset the context mid-run (window resize, driver
 	// change), in which case LOVE has to be brought back up from scratch.
+	// boot() builds the Lua state and creates the boot coroutine; it does NOT
+	// drive it. The game's own load, and any setMode it makes, happen on the
+	// first resume in retro_run.
 	if (!love::libretro::boot(game_path))
 		log_cb(RETRO_LOG_ERROR, "[LOVE] boot failed\n");
 
@@ -311,12 +380,46 @@ RETRO_API void retro_init()
 	// Mesa only keeps its shader cache when it can find a writable cache
 	// directory; a frontend running without a usable HOME silently loses it, and
 	// then EVERY session recompiles EVERY shader from scratch -- a stall the
-	// first time each shader is used. Pointing the cache at the save directory
-	// makes those compiles a one-time cost per board.
+	// first time each shader is used. Naming a directory makes those compiles a
+	// one-time cost per board.
+	//
+	// It has to be named explicitly: Mesa does follow XDG_CACHE_HOME, but nothing
+	// on a Recalbox sets that variable (checked across the distribution), so
+	// relying on it would put us straight back to no cache at all. That is also
+	// how the distribution itself handles this -- its Dolphin and Reicast
+	// launchers pass XDG_CONFIG_HOME and XDG_DATA_HOME explicitly rather than
+	// assume an environment.
+	//
+	// NOT under the save directory, where this used to live. A shader cache is
+	// disposable, machine-specific, regenerated on demand and shared with
+	// whatever else Mesa compiles -- RetroArch's own shaders included. Saves are
+	// the opposite: the one thing a player would be upset to lose, and the thing
+	// they copy to a new board. 64MB of GPU binaries in the middle of them reads
+	// as something worth keeping, and would travel to a machine whose GPU cannot
+	// use a byte of it. A cache directory says what it is.
 	if (!love::libretro::state.save_dir.empty())
 	{
-		std::string cache = love::libretro::state.save_dir + "/shader_cache";
+		// Derived from the save directory because that is the only path the
+		// frontend gives us. On a Recalbox that is /recalbox/share/saves/<system>,
+		// two levels below the share root, whose sibling "system" folder is where
+		// the distribution keeps machine-local state (.emulationstation and the
+		// rest). Anywhere else, or if the shape does not match, fall back to a
+		// cache folder beside the saves: still writable, still out of the way,
+		// and still better than no cache.
+		const std::string &savedir = love::libretro::state.save_dir;
+		std::string cache;
+
+		const size_t saves = savedir.rfind("/saves/");
+		if (saves != std::string::npos)
+			cache = savedir.substr(0, saves) + "/system/.cache";
+		else
+			cache = savedir + "/.cache";
+
+		// The directory Mesa is pointed at, not the cache itself: it creates its
+		// own "mesa_shader_cache" below whatever it is given, so naming that here
+		// too would nest one inside the other.
 		mkdir(cache.c_str(), 0755);
+
 		setenv("MESA_SHADER_CACHE_DIR", cache.c_str(), 0);
 		setenv("MESA_GLSL_CACHE_DIR", cache.c_str(), 0);   // pre-20.x Mesa
 		setenv("MESA_SHADER_CACHE_MAX_SIZE", "64M", 0);
@@ -451,6 +554,12 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info)
 
 	reported_w = love::libretro::state.width;
 	reported_h = love::libretro::state.height;
+
+	// Seed the geometry trackers with what we just answered. Zeroing them would
+	// make the first setMode look like a change from nothing and fire a needless
+	// reallocation even for a game that runs at exactly the size announced.
+	last_w = fbo_w = love::libretro::state.width;
+	last_h = fbo_h = love::libretro::state.height;
 
 	info->timing.fps            = love::libretro::state.fps;
 	info->timing.sample_rate    = love::libretro::SAMPLE_RATE;
@@ -675,83 +784,7 @@ RETRO_API void retro_run()
 	// SET_GEOMETRY remains for the case where nothing needs reallocating, which
 	// after this is only a change of aspect ratio at an unchanged size.
 	{
-		// Seeded, not zeroed. These start at whatever retro_get_system_av_info
-		// reported. Starting them at 0 made the first frame look like a change
-		// from nothing, firing the expensive path even for a game that runs at
-		// exactly the size already announced.
-		//
-		// With peek_game_size doing its job (see retro_load_game) the seed is
-		// already the game's own size, so a game that declares one in conf.lua
-		// pays no SET_SYSTEM_AV_INFO at launch and boots once. A game that
-		// declares none -- Balatro asks for 0x0 -- has nothing to read, is
-		// seeded with the 800x600 default, and still pays one reallocation and
-		// the reboot that comes with it.
-		static unsigned last_w = reported_w;
-		static unsigned last_h = reported_h;
-		static unsigned fbo_w  = reported_w;   // what the frontend has allocated
-		static unsigned fbo_h  = reported_h;
-
-		const unsigned w = love::libretro::state.width;
-		const unsigned h = love::libretro::state.height;
-
-		if ((w != last_w || h != last_h) && w > 0 && h > 0)
-		{
-			// Resize the framebuffer whenever it does not already match the game
-			// exactly -- not merely when the game outgrows it.
-			//
-			// The cheap path (SET_GEOMETRY, re-crop inside the buffer we have)
-			// was written to avoid the context rebuild for a game that FITS. It
-			// does avoid it, and on HDMI the result is indistinguishable: the
-			// frontend crops to base and centres. On a 15 kHz CRT it is not.
-			// crtswitchres derives its modeline from the ALLOCATED framebuffer,
-			// so a game rendering 768x600 inside an 800x600 buffer gets a
-			// modeline for 800x600 and a picture pushed off-centre -- Mr. Rescue,
-			// 32px of unused width, a black band at the top on real hardware.
-			//
-			// This is the same defect the July fix addressed for an oversized
-			// max (1920x1080), reappearing at a size small enough that "it fits"
-			// looked like a reason not to pay. The rule that actually holds is
-			// the one that fix established: the framebuffer is sized to the game,
-			// always. So the exact-match test replaces the outgrows test.
-			//
-			// The cost is one context rebuild per resolution change rather than
-			// zero. A game changes resolution rarely (usually once, at boot), and
-			// a rebuild is ~0.4s of reboot against a picture that is simply wrong
-			// on an entire class of display.
-			const bool needs_fbo_resize = (w != fbo_w || h != fbo_h);
-
-			struct retro_game_geometry geom;
-			std::memset(&geom, 0, sizeof(geom));
-			geom.base_width   = w;
-			geom.base_height  = h;
-			geom.max_width    = needs_fbo_resize ? w : fbo_w;
-			geom.max_height   = needs_fbo_resize ? h : fbo_h;
-			geom.aspect_ratio = (float) w / (float) h;
-
-			if (needs_fbo_resize)
-			{
-				struct retro_system_av_info av;
-				std::memset(&av, 0, sizeof(av));
-				av.geometry           = geom;
-				av.timing.fps         = love::libretro::state.fps;
-				av.timing.sample_rate = love::libretro::SAMPLE_RATE;
-
-				environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
-
-				fbo_w = w;
-				fbo_h = h;
-				log_cb(RETRO_LOG_INFO, "[LOVE] geometry: %ux%u (fbo resized)\n", w, h);
-			}
-			else
-			{
-				environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
-				log_cb(RETRO_LOG_INFO, "[LOVE] geometry: %ux%u (within %ux%u)\n",
-				       w, h, fbo_w, fbo_h);
-			}
-
-			last_w = w;
-			last_h = h;
-		}
+		publish_geometry();
 	}
 
 	// Pull this frame's audio out of LOVE and hand it to the frontend.
