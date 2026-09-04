@@ -46,6 +46,7 @@ extern "C" {
 #include <cstring>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 
 namespace love {
 namespace libretro {
@@ -296,6 +297,19 @@ bool display_is_15khz()
 
 	cached = 0;
 
+	// A development machine has no 15kHz CRT, so every size decision that depends
+	// on one is unreachable there -- and unreachable means untested. This project
+	// has already shipped three display fixes that no test could see; the override
+	// exists so that cannot happen again. Read from the environment, never from a
+	// core option: a player has no use for it.
+	if (const char *forced = getenv("LOVE_LIBRETRO_FORCE_CRT"))
+	{
+		cached = (forced[0] == '1') ? 1 : 0;
+		log(RETRO_LOG_INFO, "[LOVE] display: LOVE_LIBRETRO_FORCE_CRT=%s -- %s\n",
+		    forced, cached ? "pretending a 15kHz CRT" : "pretending no CRT");
+		return cached != 0;
+	}
+
 	DIR *d = opendir("/sys/class/drm");
 	if (d == nullptr)
 	{
@@ -375,6 +389,17 @@ void scale_to_display(int &w, int &h)
 	// So the mode list is chosen by the fps the core announces, and a
 	// player who sets fps=50 gets the PAL sizes, which is then right for
 	// them.
+	//
+	// Above ~288 lines, EVERYTHING on a 15kHz screen is interlaced, and the
+	// line count is what decides: at ~15.7kHz horizontal, 240 lines give 65Hz
+	// and 288 give 54Hz, but 384 would give 41Hz and 480 only 33Hz -- too slow
+	// to show, so those are drawn in two passes. A real screen says as much in
+	// its mode list: 320x240 and 384x288 plain, 640x480i and 768x576i with the
+	// "i". There is therefore no progressive 4:3 mode past 240 lines to prefer,
+	// and 512x384 is not one despite its shape -- asking for it got
+	// crtswitchres to synthesise "650x488_60i ... interlace" with "Resolution
+	// is stretched. Fractal scaling @ 1.2695", off the mode grid and blurred.
+	// Measured on a Pi 5, after a first attempt had assumed otherwise.
 	struct CRTMode { int w, h; };
 	static const CRTMode NTSC_MODES[] = { { 320, 240 }, { 512, 384 }, { 640, 480 } };
 	static const CRTMode PAL_MODES[]  = { { 384, 288 }, { 512, 384 }, { 768, 576 } };
@@ -450,6 +475,80 @@ void scale_to_display(int &w, int &h)
 			{
 				bestw = m.w;
 				besth = m.h;
+			}
+		}
+
+		// Nothing of the game's own shape fits, and for a 16:9 game nothing ever
+		// will: every standard 15kHz mode is 4:3.
+		//
+		// Left alone, such a game gets a modeline made to measure -- crtswitchres
+		// answers 480x270 with "480x270_55 16.055KHz 55.172Hz", honouring the
+		// aspect the core reports. That sounds right and is not, because a CRT
+		// sweeps the SAME physical height whatever the line count: 270 lines get
+		// spread over a tube built for 240 or 480, and every pixel comes out a
+		// third taller than it is wide. Nothing downstream can undo it -- the
+		// frontend is not stretching anything, the electron beam is. Measured on
+		// a Pi 5, where the game's own "55 FPS" warning came on as well, since
+		// the display could show no more than 55.
+		//
+		// Handing the game a real 4:3 mode fixes the lot at once: square pixels,
+		// a native 60 Hz modeline, no warning, and no 9% clock gap for the
+		// frontend to resample the audio across.
+		//
+		// Restricted to a genuinely 16:9 game (1.778, within the same 2% used
+		// above), and that restriction is the load-bearing part. "Wider than the
+		// mode" is NOT enough: Sienna asks for 900x600, a ratio of 1.5, and
+		// lays itself out for the size it is handed -- sent to 640x480 it lost
+		// the right of its title and its whole menu. Measured, by looking at the
+		// picture after the log had called the run fine.
+		//
+		// 16:9 is the shape with evidence behind it. It is what a game that
+		// scales a FIXED canvas targets, and such a game letterboxes itself when
+		// the frame changes shape: Bugscraper takes math.min of both axes and
+		// centres with CANVAS_OX/OY. A game that re-lays-out instead gets
+		// cropped, which is the Mr. Rescue lesson. Nothing available before the
+		// game boots tells the two apart -- not conf.lua, not the ratio (Sienna's
+		// 1.5 is just 300x200 times three) -- so the shape is the best proxy
+		// there is, and it is deliberately a narrow one.
+		const double SIXTEEN_NINE = 16.0 / 9.0;
+
+		if (bestw == 0 && std::abs(aspect - SIXTEEN_NINE) <= 0.02 * SIXTEEN_NINE)
+		{
+			for (int i = 0; i < NUM_MODES; i++)
+			{
+				const CRTMode &m = MODES[i];
+
+				// It has to be a mode the SCREEN actually has, progressive or
+				// not. Preferring a progressive one was tried and backfired:
+				// 512x384 looks progressive by its shape but a 15kHz tube cannot
+				// draw 384 lines in one pass, so crtswitchres synthesised
+				// "650x488_60i ... interlace" with "Resolution is stretched.
+				// Fractal scaling @ 1.2695" -- interlaced anyway, off the mode
+				// grid, and blurred by a fractional scale. Above ~288 lines
+				// everything on a 15kHz screen is interlaced; there is no
+				// progressive 4:3 mode past 240 lines to prefer.
+				//
+				// So the real choice is 320x240 progressive or 640x480
+				// interlaced, and it is decided by what the game loses. A fixed
+				// canvas of 480x270 scaled into 320x240 lands on 320x180 and
+				// throws away 56% of its pixels; into 640x480 it lands on
+				// 640x360 with everything intact. Interlacing costs steadiness
+				// on fine detail; undersampling costs the detail outright. The
+				// taller mode was the one checked on a real CRT and read as
+				// good, so definition wins.
+
+				// The game must be WIDER than the mode: scaling it to fit then
+				// leaves bars above and below, which costs screen area only. A
+				// taller game would have to lose picture off the sides instead.
+				if (aspect <= (double) m.w / (double) m.h)
+					continue;
+
+				// Widest wins -- it keeps the most of the game's own pixels.
+				if (m.w > bestw)
+				{
+					bestw = m.w;
+					besth = m.h;
+				}
 			}
 		}
 
